@@ -1,0 +1,27 @@
+{
+  "name": "cemetery-api",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js",
+    "db:init:mysql": "node scripts/init-mysql.js",
+    "test": "node --test \"tests/*.test.js\"",
+    "test:syntax": "node scripts/check-syntax.js",
+    "smoke": "node scripts/smoke-test.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "body-parser": "^1.20.2",
+    "cors": "^2.8.5",
+    "dotenv": "^17.4.2",
+    "express": "^4.18.2",
+    "express-jwt": "^8.4.1",
+    "jsonwebtoken": "^9.0.2",
+    "mysql2": "^3.14.3"
+  }
+}
