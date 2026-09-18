@@ -312,10 +312,10 @@ test('rbac: 操作员具备菜单动作权限时放行,否则 403', async () => 
     mockPool.setSelectRows([]);
     const deniedResponse = await fetch(`${base}/guard`);
     assert.strictEqual(deniedResponse.status, 403);
-    // 权限查询语句按菜单ID与动作列过滤(useCreate)
+    // 权限查询语句按菜单ID过滤(useMenu)
     const permSql = mockPool.calls.find((call) => call.sql.includes('operator_power'));
     assert.ok(permSql);
-    assert.ok(permSql.sql.includes('useCreate = 1'));
+    assert.ok(permSql.sql.includes('useMenu = 1'));
   } finally {
     server.close();
   }

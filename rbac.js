@@ -15,17 +15,9 @@ function requirePlatformAdmin(req, res, next) {
   return res.status(403).json({ error: '无权限:仅平台管理员可操作!' });
 }
 
-// RBAC 动作 → operator_power 列名(白名单,非用户输入) 20260917 新增,
-const POWER_FIELD_BY_ACTION = {
-  menu: 'useMenu',
-  create: 'useCreate',
-  modify: 'useModify',
-  delete: 'useDelete',
-};
-
-// RBAC 中间件:校验当前操作员在指定菜单下具备指定动作权限;平台管理员全放行,
-function requirePower(menuId, action) {
-  const field = POWER_FIELD_BY_ACTION[action];
+// RBAC 中间件:校验当前操作员在指定菜单下具备菜单权限(useMenu=1);平台管理员全放行,
+// 业务规则:动作级字段(useCreate/useModify/useDelete)未启用,useMenu=1 即视为具备全部操作权限 20260918 修正,
+function requirePower(menuId) {
   return async function (req, res, next) {
     if (isPlatformAdmin(req)) {
       return next();
@@ -34,7 +26,7 @@ function requirePower(menuId, action) {
       const sql =
         'SELECT 1 FROM gm_data_000.operator_power a ' +
         'JOIN gm_data_000.operator b ON a.idOperator = b.idOperator ' +
-        'WHERE b.idOperator = ? and b.isDeleted = 0 and a.idMenu = ? and a.useMenu = 1 and a.' + field + ' = 1';
+        'WHERE b.idOperator = ? and b.isDeleted = 0 and a.idMenu = ? and a.useMenu = 1';
       const rows = await pool.query(sql, [req.data.userId, menuId]);
       if (Array.isArray(rows) && rows.length > 0) {
         return next();
