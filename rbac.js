@@ -38,4 +38,33 @@ function requirePower(menuId) {
   };
 }
 
-module.exports = { isPlatformAdmin, requirePlatformAdmin, requirePower };
+// RBAC 按菜单 name 动态解析当前 idMenu 后校验:菜单 id 会因显示顺序调整而变化,代码不能写死 id;
+// 每次请求查 menu 表拿 id(菜单表极小,开销可忽略),name 缺失视为配置错误拒绝访问 20260919 动态化,
+function requirePowerByMenuName(menuName) {
+  return async function (req, res, next) {
+    if (isPlatformAdmin(req)) {
+      return next();
+    }
+    try {
+      const menuRows = await pool.query('SELECT id FROM gm_data_000.menu WHERE name = ?', [menuName]);
+      if (!Array.isArray(menuRows) || menuRows.length === 0) {
+        console.error('[rbac] 菜单未配置,拒绝访问:', menuName);
+        return res.status(403).json({ error: '无权限:菜单未配置!' });
+      }
+      const menuId = menuRows[0].id;
+      const sql =
+        'SELECT 1 FROM gm_data_000.operator_power a ' +
+        'JOIN gm_data_000.operator b ON a.idOperator = b.idOperator ' +
+        'WHERE b.idOperator = ? and b.isDeleted = 0 and a.idMenu = ? and a.useMenu = 1';
+      const rows = await pool.query(sql, [req.data.userId, menuId]);
+      if (Array.isArray(rows) && rows.length > 0) {
+        return next();
+      }
+      return res.status(403).json({ error: '无权限:当前账号缺少该菜单操作权限!' });
+    } catch (error) {
+      return public.handleQueryError(res, error);
+    }
+  };
+}
+
+module.exports = { isPlatformAdmin, requirePlatformAdmin, requirePower, requirePowerByMenuName };

@@ -83,7 +83,7 @@ INSERT INTO `account_power` VALUES ('102102', 1, 0, 0, 0, 0, 0, 0, 'menu.tagInfo
 INSERT INTO `account_power` VALUES ('102103', 1, 0, 0, 0, 0, 0, 0, 'menu.park', 'gm_data_000', 2, '', 'menu.parkDescribe');
 INSERT INTO `account_power` VALUES ('102104', 1, 1, 1, 1, 0, 0, 1, 'menu.operator', 'gm_data_000', 2, '', 'menu.operatorDescribe');
 INSERT INTO `account_power` VALUES ('103100', 1, 0, 0, 0, 0, 0, 0, 'menu.operate', 'gm_data_000', 1, '', 'menu.operateDescribe');
-INSERT INTO `account_power` VALUES ('103101', 1, 1, 1, 0, 0, 0, 0, 'menu.room', 'gm_data_000', 2, '', 'menu.roomDescribe');
+INSERT INTO `account_power` VALUES ('103107', 1, 1, 1, 0, 0, 0, 0, 'menu.room', 'gm_data_000', 2, '', 'menu.roomDescribe');
 INSERT INTO `account_power` VALUES ('103102', 1, 1, 1, 1, 0, 0, 0, 'menu.sale', 'gm_data_000', 2, '', 'menu.saleDescribe');
 INSERT INTO `account_power` VALUES ('103103', 1, 1, 1, 1, 0, 0, 0, 'menu.buried', 'gm_data_000', 2, '', 'menu.buriedDescribe');
 INSERT INTO `account_power` VALUES ('103104', 1, 1, 1, 1, 0, 0, 0, 'menu.reserve', 'gm_data_000', 2, '', 'menu.reserveDescribe');
@@ -158,7 +158,7 @@ INSERT INTO `menu` VALUES ('102102', 'taginfo', 'tagInfo', '/taginfo/index', '',
 INSERT INTO `menu` VALUES ('102103', 'park', 'park', '/park/index', '', NULL, '102100', '园区设置', 'Park Settings');
 INSERT INTO `menu` VALUES ('102104', 'operator', 'operator', '/operator/index', '', NULL, '102100', '操作人员', 'Operator');
 INSERT INTO `menu` VALUES ('103100', '/operate', 'operate', 'LAYOUT', '/operate/base', 'assignment', '0', '墓区业务', 'Cemetery Business');
-INSERT INTO `menu` VALUES ('103101', 'room', 'room', '/room/index', '', NULL, '103100', '墓区设置', 'Cemetery Area Settings');
+INSERT INTO `menu` VALUES ('103107', 'room', 'room', '/room/index', '', NULL, '103100', '墓位设置', 'Cemetery Area Settings');
 INSERT INTO `menu` VALUES ('103102', 'sale', 'sale', '/sale/index', '', NULL, '103100', '墓区销售', 'Cemetery Sales');
 INSERT INTO `menu` VALUES ('103103', 'buried', 'buried', '/buried/index', '', NULL, '103100', '墓区下葬', 'Cemetery Burials');
 INSERT INTO `menu` VALUES ('103104', 'reserve', 'reserve', '/reserve/index', '', NULL, '103100', '墓区预定', 'Cemetery Reservations');
@@ -233,7 +233,7 @@ INSERT INTO `operator_power` VALUES (100005, 1000, '102102', 1, 0, 0, 0, 0, 0, 0
 INSERT INTO `operator_power` VALUES (100006, 1000, '102103', 1, 0, 0, 0, 0, 0, 0);
 INSERT INTO `operator_power` VALUES (100007, 1000, '102104', 1, 1, 1, 1, 0, 0, 1);
 INSERT INTO `operator_power` VALUES (100008, 1000, '103100', 1, 0, 0, 0, 0, 0, 0);
-INSERT INTO `operator_power` VALUES (100009, 1000, '103101', 1, 1, 1, 0, 0, 1, 0);
+INSERT INTO `operator_power` VALUES (100009, 1000, '103107', 1, 1, 1, 0, 0, 1, 0);
 INSERT INTO `operator_power` VALUES (100010, 1000, '103102', 1, 1, 1, 1, 0, 0, 0);
 INSERT INTO `operator_power` VALUES (100011, 1000, '103103', 1, 1, 1, 1, 0, 0, 0);
 INSERT INTO `operator_power` VALUES (100012, 1000, '103104', 1, 1, 1, 1, 0, 0, 0);
@@ -247,7 +247,7 @@ INSERT INTO `operator_power` VALUES (100019, 1000, '105101', 1, 0, 0, 0, 0, 0, 0
 INSERT INTO `operator_power` VALUES (100020, 1000, '105102', 1, 0, 0, 0, 0, 0, 0);
 INSERT INTO `operator_power` VALUES (100021, 1000, '105103', 1, 0, 0, 0, 0, 0, 0);
 INSERT INTO `operator_power` VALUES (100022, 1000, '105104', 1, 0, 0, 0, 0, 0, 0);
-INSERT INTO `operator_power` VALUES (100023, 1000, '105105', 1, 1, 1, 1, 0, 0, 0);
+INSERT INTO `operator_power` VALUES (100023, 1000, '105105', 1, 0, 0, 0, 0, 0, 0);
 
 
 -- ----------------------------
@@ -329,6 +329,7 @@ DROP TABLE IF EXISTS `sale`;
 CREATE TABLE `sale` (
   `idSale` bigint(20) NOT NULL AUTO_INCREMENT,
   `idRoom` bigint(20) NOT NULL,
+  `serialNo` varchar(6) DEFAULT NULL COMMENT '编号',
   `realPrice` int(11) DEFAULT NULL COMMENT '实际价格',
   `payee` varchar(20) DEFAULT NULL COMMENT '收款人',
   `payer` varchar(20) DEFAULT NULL COMMENT '付款人',
@@ -366,7 +367,7 @@ CREATE TABLE `adminfee` (
   `modifyDate` datetime DEFAULT NULL COMMENT '修改日期',
   `isDeleted` smallint(1) unsigned zerofill DEFAULT '0' COMMENT '是否删除',
   PRIMARY KEY (`idAdminfee`) USING BTREE
-) ENGINE=InnoDB AUTO_INCREMENT=3000000 DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
+) ENGINE=InnoDB AUTO_INCREMENT=4000000 DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
 
 -- ----------------------------
 -- Table structure for buried
@@ -387,7 +388,7 @@ CREATE TABLE `buried` (
   `createDate` datetime DEFAULT NULL COMMENT '创建日期',
   `isDeleted` smallint(1) unsigned zerofill DEFAULT '0' COMMENT '是否删除',
   PRIMARY KEY (`idBuried`) USING BTREE
-) ENGINE=InnoDB AUTO_INCREMENT=4000000 DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
+) ENGINE=InnoDB AUTO_INCREMENT=3000000 DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
 
 -- ----------------------------
 -- Table structure for contacts

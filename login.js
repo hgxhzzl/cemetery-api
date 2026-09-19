@@ -50,7 +50,8 @@ router.post('/', async (req, res) => {
     json.userPhone = phone;
     json.userId = user.userid;
     json.userInfo = {roles:[]};
-    const sql = 'SELECT * FROM gm_data_000.operator_power a WHERE a.idOperator = ?';
+    // roles 附带菜单 name(menuName),前端按稳定 name 匹配权限,菜单 id 因排序调整变化时不需改代码 20260919 修复,
+    const sql = 'SELECT a.*, m.name AS menuName FROM gm_data_000.operator_power a LEFT JOIN gm_data_000.menu m ON m.id = a.idMenu WHERE a.idOperator = ?';
 
     const roleResults = await pool.query(sql, [user.userid]);
     json.userInfo.roles = roleResults;

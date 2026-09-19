@@ -177,11 +177,11 @@ app.use(async function (req, res, next) {
 app.use('/api/login',userRoutes);
 app.use('/api/get-menu-list-i18n',menuROutes);
 
-//合同接口(菜单 101102 合同列表) 20260917 RBAC 接入,
-app.use('/api/contract-save/insert', rbac.requirePower('101102', 'create'));
-app.use('/api/contract-save/update', rbac.requirePower('101102', 'modify'));
-app.use('/api/contract-delete', rbac.requirePower('101102', 'delete'));
-app.use('/api/contract-query', rbac.requirePower('101102', 'menu'));
+//合同接口(菜单 101102 合同列表) 20260917 RBAC 接入,20260919 改按菜单 name 动态解析,
+app.use('/api/contract-save/insert', rbac.requirePowerByMenuName('contract'));
+app.use('/api/contract-save/update', rbac.requirePowerByMenuName('contract'));
+app.use('/api/contract-delete', rbac.requirePowerByMenuName('contract'));
+app.use('/api/contract-query', rbac.requirePowerByMenuName('contract'));
 app.use('/api/contract-delete',contractDeleteROutes);
 app.use('/api/contract-query',contractQueryROutes);
 app.use('/api/contract-save',contractSaveROutes);
@@ -189,103 +189,102 @@ app.use('/api/contract-save',contractSaveROutes);
 app.use('/api/account-save',accountSaveROutes);
 app.use('/api/account-query',accountQueryROutes);
 app.use('/api/account-delete',accountDeleteROutes);
-//标签接口(菜单 102102 选择设置) 20260917 RBAC 接入,
-app.use('/api/taginfo-save/insert', rbac.requirePower('102102', 'create'));
-app.use('/api/taginfo-query', rbac.requirePower('102102', 'menu'));
+//标签接口(菜单 102102 选择设置) 20260917 RBAC 接入,20260919 改按菜单 name 动态解析,
+app.use('/api/taginfo-save/insert', rbac.requirePowerByMenuName('tagInfo'));
+app.use('/api/taginfo-query', rbac.requirePowerByMenuName('tagInfo'));
 app.use('/api/taginfo-query',taginfoQueryROutes);
 app.use('/api/taginfo-save',taginfoSaveROutes);
 
-//操作员接口(菜单 102104 操作人员) 20260917 RBAC 接入,
-app.use('/api/operator-save/insert', rbac.requirePower('102104', 'create'));
-app.use('/api/operator-save/update', rbac.requirePower('102104', 'modify'));
-app.use('/api/operator-save/password', rbac.requirePower('102104', 'modify'));
-app.use('/api/operator-save/power', rbac.requirePower('102104', 'modify'));
-app.use('/api/operator-delete', rbac.requirePower('102104', 'delete'));
-app.use('/api/operator-query', rbac.requirePower('102104', 'menu'));
+//操作员接口(菜单 102104 操作人员) 20260917 RBAC 接入,20260919 改按菜单 name 动态解析,
+app.use('/api/operator-save/insert', rbac.requirePowerByMenuName('operator'));
+app.use('/api/operator-save/update', rbac.requirePowerByMenuName('operator'));
+app.use('/api/operator-save/password', rbac.requirePowerByMenuName('operator'));
+app.use('/api/operator-save/power', rbac.requirePowerByMenuName('operator'));
+app.use('/api/operator-delete', rbac.requirePowerByMenuName('operator'));
+app.use('/api/operator-query', rbac.requirePowerByMenuName('operator'));
 app.use('/api/operator-save',operatorSaveROutes);
 app.use('/api/operator-query',operatorQueryROutes);
 app.use('/api/operator-delete',operatorDeleteROutes);
-//操作员权限接口(菜单 102104 操作人员)
-app.use('/api/operatorPower-save/power', rbac.requirePower('102104', 'modify'));
-app.use('/api/operatorPower-query', rbac.requirePower('102104', 'menu'));
+//操作员权限接口(菜单 102104 操作人员) 20260919 改按菜单 name 动态解析,
+app.use('/api/operatorPower-save/power', rbac.requirePowerByMenuName('operator'));
+app.use('/api/operatorPower-query', rbac.requirePowerByMenuName('operator'));
 app.use('/api/operatorPower-save',operatorPowerSaveROutes);
 app.use('/api/operatorPower-query',operatorPowerQueryROutes);
-//园区接口(菜单 102103 园区设置)
-app.use('/api/park-save/insert', rbac.requirePower('102103', 'create'));
-app.use('/api/park-query', rbac.requirePower('102103', 'menu'));
+//园区接口(菜单 102103 园区设置) 20260919 改按菜单 name 动态解析,
+app.use('/api/park-save/insert', rbac.requirePowerByMenuName('park'));
+app.use('/api/park-query', rbac.requirePowerByMenuName('park'));
 app.use('/api/park-save',parkSaveROutes);
 app.use('/api/park-query',parkQueryROutes);
-//room接口(菜单 103101 墓区设置)
-app.use('/api/room-save/insert', rbac.requirePower('103101', 'create'));
-app.use('/api/room-save/update', rbac.requirePower('103101', 'modify'));
-app.use('/api/room-delete', rbac.requirePower('103101', 'delete'));
-app.use('/api/room-query', rbac.requirePower('103101', 'menu'));
+//room接口(菜单 name=room 墓位设置,按 name 动态解析 id,菜单 id 因排序调整变化时不需改代码 20260919 修复)
+app.use('/api/room-save/insert', rbac.requirePowerByMenuName('room'));
+app.use('/api/room-save/update', rbac.requirePowerByMenuName('room'));
+app.use('/api/room-delete', rbac.requirePowerByMenuName('room'));
+app.use('/api/room-query', rbac.requirePowerByMenuName('room'));
 app.use('/api/room-save',roomSaveROutes);
 app.use('/api/room-query',roomQueryROutes);
 app.use('/api/room-delete',roomDeleteROutes);
 
-//销售接口(菜单 103102 墓区销售) 20260917 RBAC 接入,
-app.use('/api/sale-save/insert', rbac.requirePower('103102', 'create'));
-app.use('/api/sale-save/update', rbac.requirePower('103102', 'modify'));
-app.use('/api/sale-delete', rbac.requirePower('103102', 'delete'));
-app.use('/api/sale-query', rbac.requirePower('103102', 'menu'));
+//销售接口(菜单 103102 墓位销售) 20260917 RBAC 接入,20260919 改按菜单 name 动态解析,
+app.use('/api/sale-save/insert', rbac.requirePowerByMenuName('sale'));
+app.use('/api/sale-save/update', rbac.requirePowerByMenuName('sale'));
+app.use('/api/sale-delete', rbac.requirePowerByMenuName('sale'));
+app.use('/api/sale-query', rbac.requirePowerByMenuName('sale'));
 app.use('/api/sale-save',saleSaveROutes);
 app.use('/api/sale-delete',saleDeleteROutes);
 app.use('/api/sale-query',saleQueryROutes);
-//销售统计查询接口(菜单 105101/105102/105103/105104 查询统计)
-// 去掉模块名中冗余的 -query 后缀(目录名已含 Query) 20260915 路由清理,
-app.use('/api/saleQuery', rbac.requirePower('105101', 'menu'));
-app.use('/api/buriedQuery', rbac.requirePower('105102', 'menu'));
-app.use('/api/adminfeeQuery', rbac.requirePower('105103', 'menu'));
-app.use('/api/contactsQuery', rbac.requirePower('105104', 'menu'));
+//销售统计查询接口(菜单 105101/105102/105103/105104 查询统计) 20260919 改按菜单 name 动态解析,
+app.use('/api/saleQuery', rbac.requirePowerByMenuName('saleQuery'));
+app.use('/api/buriedQuery', rbac.requirePowerByMenuName('buriedQuery'));
+app.use('/api/adminfeeQuery', rbac.requirePowerByMenuName('adminfeeQuery'));
+app.use('/api/contactsQuery', rbac.requirePowerByMenuName('contactsQuery'));
 app.use('/api/saleQuery',saleQueryStatsRoutes);
 app.use('/api/buriedQuery',buriedQueryStatsRoutes);
 app.use('/api/adminfeeQuery',adminfeeQueryStatsRoutes);
 app.use('/api/contactsQuery',contactsQueryStatsRoutes);
-//管理期限接口(菜单 104102 管理期限)
-app.use('/api/managementPeriod-save/update', rbac.requirePower('104102', 'modify'));
-app.use('/api/managementPeriod', rbac.requirePower('104102', 'menu'));
+//管理期限接口(菜单 104102 管理期限) 20260919 改按菜单 name 动态解析,
+app.use('/api/managementPeriod-save/update', rbac.requirePowerByMenuName('managementPeriod'));
+app.use('/api/managementPeriod', rbac.requirePowerByMenuName('managementPeriod'));
 app.use('/api/managementPeriod',managementPeriodRoutes);
 app.use('/api/managementPeriod-save',managementPeriodSaveRoutes);
 
 
-//下葬接口(菜单 103103 墓区下葬) 20260917 RBAC 接入,
-app.use('/api/buried-save/insert', rbac.requirePower('103103', 'create'));
-app.use('/api/buried-save/update', rbac.requirePower('103103', 'modify'));
-app.use('/api/buried-delete', rbac.requirePower('103103', 'delete'));
-app.use('/api/buried-query', rbac.requirePower('103103', 'menu'));
+//下葬接口(菜单 103103 墓位下葬) 20260917 RBAC 接入,20260919 改按菜单 name 动态解析,
+app.use('/api/buried-save/insert', rbac.requirePowerByMenuName('buried'));
+app.use('/api/buried-save/update', rbac.requirePowerByMenuName('buried'));
+app.use('/api/buried-delete', rbac.requirePowerByMenuName('buried'));
+app.use('/api/buried-query', rbac.requirePowerByMenuName('buried'));
 app.use('/api/buried-save',buriedSaveROutes);
 app.use('/api/buried-query',buriedQueryROutes);
 app.use('/api/buried-delete',buriedDeleteROutes);
-//迁出接口(菜单 103106 墓位迁出)
-app.use('/api/transferOut-save/insert', rbac.requirePower('103106', 'create'));
-app.use('/api/transferOut-save/update', rbac.requirePower('103106', 'modify'));
-app.use('/api/transferOut-delete', rbac.requirePower('103106', 'delete'));
-app.use('/api/transferOut-query', rbac.requirePower('103106', 'menu'));
+//迁出接口(菜单 103106 墓位迁出) 20260919 改按菜单 name 动态解析,
+app.use('/api/transferOut-save/insert', rbac.requirePowerByMenuName('transferOut'));
+app.use('/api/transferOut-save/update', rbac.requirePowerByMenuName('transferOut'));
+app.use('/api/transferOut-delete', rbac.requirePowerByMenuName('transferOut'));
+app.use('/api/transferOut-query', rbac.requirePowerByMenuName('transferOut'));
 app.use('/api/transferOut-save',transferOutSaveROutes);
 app.use('/api/transferOut-query',transferOutQueryROutes);
 app.use('/api/transferOut-delete',transferOutDeleteROutes);
-//管理费收款接口(菜单 104101 管理收款)
-app.use('/api/adminfee-save/insert', rbac.requirePower('104101', 'create'));
-app.use('/api/adminfee-save/update', rbac.requirePower('104101', 'modify'));
-app.use('/api/adminfee-delete', rbac.requirePower('104101', 'delete'));
-app.use('/api/adminfee-query', rbac.requirePower('104101', 'menu'));
+//管理费收款接口(菜单 104101 管理收款) 20260919 改按菜单 name 动态解析,
+app.use('/api/adminfee-save/insert', rbac.requirePowerByMenuName('adminfee'));
+app.use('/api/adminfee-save/update', rbac.requirePowerByMenuName('adminfee'));
+app.use('/api/adminfee-delete', rbac.requirePowerByMenuName('adminfee'));
+app.use('/api/adminfee-query', rbac.requirePowerByMenuName('adminfee'));
 app.use('/api/adminfee-save',adminfeeSaveROutes);
 app.use('/api/adminfee-query',adminfeeQueryROutes);
 app.use('/api/adminfee-delete',adminfeeDeleteROutes);
-//墓位联系人接口(菜单 103105 墓位联系)
-app.use('/api/contacts-save/insert', rbac.requirePower('103105', 'create'));
-app.use('/api/contacts-save/update', rbac.requirePower('103105', 'modify'));
-app.use('/api/contacts-delete', rbac.requirePower('103105', 'delete'));
-app.use('/api/contacts-query', rbac.requirePower('103105', 'menu'));
+//墓位联系人接口(菜单 103105 墓位联系) 20260919 改按菜单 name 动态解析,
+app.use('/api/contacts-save/insert', rbac.requirePowerByMenuName('contacts'));
+app.use('/api/contacts-save/update', rbac.requirePowerByMenuName('contacts'));
+app.use('/api/contacts-delete', rbac.requirePowerByMenuName('contacts'));
+app.use('/api/contacts-query', rbac.requirePowerByMenuName('contacts'));
 app.use('/api/contacts-save',contactsSaveROutes);
 app.use('/api/contacts-query',contactsQueryROutes);
 app.use('/api/contacts-delete',contactsDeleteROutes);
-//预定接口(菜单 103104 墓区预定)
-app.use('/api/reserve-save/insert', rbac.requirePower('103104', 'create'));
-app.use('/api/reserve-save/update', rbac.requirePower('103104', 'modify'));
-app.use('/api/reserve-delete', rbac.requirePower('103104', 'delete'));
-app.use('/api/reserve-query', rbac.requirePower('103104', 'menu'));
+//预定接口(菜单 103104 墓位预定) 20260919 改按菜单 name 动态解析,
+app.use('/api/reserve-save/insert', rbac.requirePowerByMenuName('reserve'));
+app.use('/api/reserve-save/update', rbac.requirePowerByMenuName('reserve'));
+app.use('/api/reserve-delete', rbac.requirePowerByMenuName('reserve'));
+app.use('/api/reserve-query', rbac.requirePowerByMenuName('reserve'));
 app.use('/api/reserve-save',reserveSaveROutes);
 app.use('/api/reserve-query',reserveQueryROutes);
 app.use('/api/reserve-delete',reserveDeleteROutes);

@@ -173,7 +173,7 @@ npm run test:syntax # 全量 JS 语法检查
 - **平台管理员**：`isAccount=1` 且 `dataBaseName='gm_data_000'` 的账户（isAccount 由登录时写入 token payload），可访问全部接口，不受菜单动作限制。
 - **全局管理接口**（account 增删改查、accountPower、createDataBase）仅平台管理员可调用，非管理员返回 403。
 - **租户约束**：operator 的 update/password/power/delete 与查询详情，非平台管理员仅可操作/查看本租户（token 的 dataBase）对象，跨租户返回 403；改密前先做租户校验，避免跨租户暴力验证他人密码。
-- **RBAC 菜单动作**：业务接口在 [index.js](index.js) 注册时挂 `requirePower(菜单ID, 动作)`，动作 → `operator_power` 列映射为 menu/create/modify/delete → useMenu/useCreate/useModify/useDelete；平台管理员短路放行，其余按 `operator_power` 校验，无权限返回 403。菜单 ID 对照见 gm_data_000.menu 表（101102 合同、102102 选择设置、102103 园区设置、102104 操作人员、103101-103106 墓区业务、104101/104102 收费、105101-105105 查询统计）。
+- **RBAC 菜单动作**：业务接口在 [index.js](index.js) 注册时挂 `requirePowerByMenuName(菜单name)`，运行时查 gm_data_000.menu 表按 name 动态解析当前 idMenu 后校验 `operator_power.useMenu`；平台管理员短路放行，无权限返回 403。菜单 id 会因显示顺序调整而变化，代码一律用稳定 name（room/sale/buried/reserve/contacts/transferOut/adminfee/managementPeriod/contract/park/tagInfo/operator/saleQuery/buriedQuery/adminfeeQuery/contactsQuery），不要写死菜单 id；动作 → `operator_power` 列映射为 menu/create/modify/delete → useMenu/useCreate/useModify/useDelete，当前仅 useMenu=1 即视为具备全部操作权限。
 - 旧 token 无 isAccount 字段时安全默认非平台管理员，需重新登录获取新 token。
 
 ## 响应与错误码约定（现状）

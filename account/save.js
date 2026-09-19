@@ -172,7 +172,8 @@ router.post('/createDataBase', async (req, res) => {
   });
 
   // 业务视图动态复制:按模板库 SHOW CREATE VIEW 提取选择部分,替代手写 CREATE VIEW,
-  // 视图定义中未限定的表名按所属库(业务库)自动解析,新增/修改模板视图无需再改代码 20260917 视图动态化,
+  // 视图定义中未限定的表名会按创建时连接的默认库(gm_data_000)固化,必须显式改写为本库表名;
+  // 否则新租户库视图仍指向模板库数据(gm_data_002.v_region_park 曾因此错查 gm_data_000.room) 20260919 修复,
   for (const viewName of templateViews) {
     try {
       const createRows = await pool.query('SHOW CREATE VIEW `gm_data_000`.`' + viewName + '`');
@@ -182,7 +183,9 @@ router.post('/createDataBase', async (req, res) => {
         console.warn('[createDataBase] 视图定义解析失败:', viewName);
         continue;
       }
-      sqlList.push(`CREATE VIEW ${dataBaseName}.${viewName} AS ${match[1]}`);
+      // 视图引用的业务表加目标库前缀,避免未限定表名被固化到连接默认库 20260919 修复,
+      const selectPart = match[1].replace(/`room`/g, '`' + dataBaseName + '`.`room`');
+      sqlList.push(`CREATE VIEW ${dataBaseName}.${viewName} AS ${selectPart}`);
     } catch (error) {
       console.warn('[createDataBase] 读取视图定义失败:', viewName, error.message);
     }
