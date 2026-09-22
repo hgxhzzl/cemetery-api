@@ -67,4 +67,45 @@ function requirePowerByMenuName(menuName) {
   };
 }
 
-module.exports = { isPlatformAdmin, requirePlatformAdmin, requirePower, requirePowerByMenuName };
+// RBAC 多菜单任一命中放行:业务页与对应查询页共用同一接口时使用,
+// 如 /api/transferOut-query 同时服务墓位迁出(transferOut)与墓位迁出查询(transferOutQuery)两个菜单,
+// 任一菜单有 useMenu=1 权限即放行;全部缺失或菜单未配置时拒绝 20260921 新增,
+function requirePowerByAnyMenuName(...menuNames) {
+  return async function (req, res, next) {
+    if (isPlatformAdmin(req)) {
+      return next();
+    }
+    try {
+      const placeholders = menuNames.map(() => '?').join(',');
+      const menuRows = await pool.query(
+        `SELECT id FROM gm_data_000.menu WHERE name IN (${placeholders})`,
+        menuNames,
+      );
+      const menuIds = Array.isArray(menuRows) ? menuRows.map((row) => row.id) : [];
+      if (menuIds.length === 0) {
+        console.error('[rbac] 菜单未配置,拒绝访问:', menuNames.join('/'));
+        return res.status(403).json({ error: '无权限:菜单未配置!' });
+      }
+      const sql =
+        'SELECT 1 FROM gm_data_000.operator_power a ' +
+        'JOIN gm_data_000.operator b ON a.idOperator = b.idOperator ' +
+        'WHERE b.idOperator = ? and b.isDeleted = 0 and a.idMenu IN (?) and a.useMenu = 1';
+      const rows = await pool.query(sql, [req.data.userId, menuIds]);
+      if (Array.isArray(rows) && rows.length > 0) {
+        return next();
+      }
+      return res.status(403).json({ error: '无权限:当前账号缺少该菜单操作权限!' });
+    } catch (error) {
+      return public.handleQueryError(res, error);
+    }
+  };
+}
+
+module.exports = {
+  isPlatformAdmin,
+  requirePlatformAdmin,
+  requirePower,
+  requirePowerByMenuName,
+  requirePowerByAnyMenuName,
+};
+

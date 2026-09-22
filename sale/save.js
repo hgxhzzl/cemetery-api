@@ -16,6 +16,7 @@ router.post('/insert', async (req, res) => {
   const payer = req.body.payer;
   const payerPhone = req.body.payerPhone;
   const payerIDCard = req.body.payerIDCard;
+  const serialNo = req.body.serialNo;
 
   req.body.table = req.data.dataBase + '.sale';
   req.body.operator = req.data.userName;
@@ -37,6 +38,8 @@ router.post('/insert', async (req, res) => {
   json.saleStatus = 'statusType.saleStatusEnum.sold';
   // 同步 room.buyer = 付款人(可为空),与销售记录同事务 20260916 新增,
   json.buyer = payer === undefined || payer === null ? '' : payer;
+  // 同步 room.cardno = 票据编号,与销售记录同事务 20260922 新增,
+  json.cardno = serialNo === undefined || serialNo === null ? '' : serialNo;
   var sqlRoom = public.getUpdateByIdStatement(json);
   sqlList.push(sqlRoom);
 
@@ -71,6 +74,7 @@ router.post('/update', async (req, res) => {
   const payer = req.body.payer;
   const payerPhone = req.body.payerPhone;
   const payerIDCard = req.body.payerIDCard;
+  const serialNo = req.body.serialNo;
 
   req.body.table = req.data.dataBase + '.sale';
   req.body.operator = req.data.userName;
@@ -109,12 +113,13 @@ router.post('/update', async (req, res) => {
       sqlList.push(public.getRoomContactsSyncSql(req.data.dataBase, idRoom));
     }
 
-    // 同步 room.buyer = 新付款人(可为空),与销售记录同事务 20260916 新增,
+    // 同步 room.buyer = 新付款人(可为空)与 room.cardno = 票据编号,与销售记录同事务 20260916/20260922 新增,
     if (idRoom !== null) {
       const roomJson = {
         table: req.data.dataBase + '.room',
         condition: { sql: 'idRoom = ? AND isDeleted = 0', params: [idRoom] },
         buyer: payer === undefined || payer === null ? '' : payer,
+        cardno: serialNo === undefined || serialNo === null ? '' : serialNo,
         operator: req.data.userName,
       };
       sqlList.push(public.getUpdateByConditionStatement(roomJson));

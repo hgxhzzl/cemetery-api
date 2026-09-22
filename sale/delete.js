@@ -26,7 +26,7 @@ router.get('/', async (req, res) => {
     };
     const sqlSale = public.getUpdateByConditionStatement(saleJson);
 
-    // 墓位销售状态回置:未销售,与销售开单时的置位互为逆操作;同步清空购买人 20260916 修改,
+    // 墓位销售状态回置:未销售,与销售开单时的置位互为逆操作;同步清空购买人与卡号 20260916/20260922 修改,
     const roomJson = {
       table: req.data.dataBase + '.room',
       operator: req.data.userName,
@@ -34,6 +34,7 @@ router.get('/', async (req, res) => {
       idvalue: idRoom,
       saleStatus: 'statusType.saleStatusEnum.unsold',
       buyer: '',
+      cardno: '',
     };
     const sqlRoom = public.getUpdateByIdStatement(roomJson);
 

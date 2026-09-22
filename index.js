@@ -40,6 +40,10 @@ const operatorPowerSaveROutes = require('./operatorPower/save')
 const parkQueryROutes  = require('./park/query')
 const parkSaveROutes = require('./park/save')
 
+//收据配制路径
+const receiptConfigQueryROutes  = require('./receiptConfig/query')
+const receiptConfigSaveROutes = require('./receiptConfig/save')
+
 //room路径
 const roomQueryROutes  = require('./room/query')
 const roomSaveROutes = require('./room/save')
@@ -215,6 +219,13 @@ app.use('/api/park-save/insert', rbac.requirePowerByMenuName('park'));
 app.use('/api/park-query', rbac.requirePowerByMenuName('park'));
 app.use('/api/park-save',parkSaveROutes);
 app.use('/api/park-query',parkQueryROutes);
+//收据配制接口(菜单 102105 收据配制) 20260922 新增,
+app.use('/api/receiptConfig-query', rbac.requirePowerByMenuName('receiptConfig'));
+app.use('/api/receiptConfig-save', rbac.requirePowerByMenuName('receiptConfig'));
+app.use('/api/receiptConfig-query',receiptConfigQueryROutes);
+//收据配制打印查询:打印票据读取前缀/地址/电话不属页面操作,仅需登录不校验菜单权限 20260922 新增,
+app.use('/api/receiptConfig-print',receiptConfigQueryROutes);
+app.use('/api/receiptConfig-save',receiptConfigSaveROutes);
 //room接口(菜单 name=room 墓位设置,按 name 动态解析 id,菜单 id 因排序调整变化时不需改代码 20260919 修复)
 app.use('/api/room-save/insert', rbac.requirePowerByMenuName('room'));
 app.use('/api/room-save/update', rbac.requirePowerByMenuName('room'));
@@ -260,7 +271,7 @@ app.use('/api/buried-delete',buriedDeleteROutes);
 app.use('/api/transferOut-save/insert', rbac.requirePowerByMenuName('transferOut'));
 app.use('/api/transferOut-save/update', rbac.requirePowerByMenuName('transferOut'));
 app.use('/api/transferOut-delete', rbac.requirePowerByMenuName('transferOut'));
-app.use('/api/transferOut-query', rbac.requirePowerByMenuName('transferOut'));
+app.use('/api/transferOut-query', rbac.requirePowerByAnyMenuName('transferOut', 'transferOutQuery'));
 app.use('/api/transferOut-save',transferOutSaveROutes);
 app.use('/api/transferOut-query',transferOutQueryROutes);
 app.use('/api/transferOut-delete',transferOutDeleteROutes);

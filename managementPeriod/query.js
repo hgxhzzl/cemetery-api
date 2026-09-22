@@ -6,7 +6,12 @@ module.exports = router;
 
 // 管理期限查询：room 表 endDate 落在时间段内的墓位，支持区域/园区/结束日期时间段过滤与服务端分页 20260915 新增
 router.get('/list', async (req, res) => {
-    const conditions = ['r.isDeleted = 0', 'r.endDate IS NOT NULL'];
+    // 已迁出的墓位不展示（迁出为终态，与前端卡片列表页规则一致）20260921 新增
+    const conditions = [
+        'r.isDeleted = 0',
+        'r.endDate IS NOT NULL',
+        '(r.transferOutStatus IS NULL OR r.transferOutStatus <> \'statusType.transferOutStatusEnum.out\')',
+    ];
     const params = [];
 
     const region = String(req.query.region || '').trim();

@@ -82,6 +82,7 @@ INSERT INTO `account_power` VALUES ('102100', 1, 0, 0, 0, 0, 0, 0, 'menu.set', '
 INSERT INTO `account_power` VALUES ('102102', 1, 0, 0, 0, 0, 0, 0, 'menu.tagInfo', 'gm_data_000', 2, '', 'menu.tagInfoDescribe');
 INSERT INTO `account_power` VALUES ('102103', 1, 0, 0, 0, 0, 0, 0, 'menu.park', 'gm_data_000', 2, '', 'menu.parkDescribe');
 INSERT INTO `account_power` VALUES ('102104', 1, 1, 1, 1, 0, 0, 1, 'menu.operator', 'gm_data_000', 2, '', 'menu.operatorDescribe');
+INSERT INTO `account_power` VALUES ('102105', 1, 0, 0, 0, 0, 0, 0, 'menu.receiptConfig', 'gm_data_000', 2, '', 'menu.receiptConfigDescribe');
 INSERT INTO `account_power` VALUES ('103100', 1, 0, 0, 0, 0, 0, 0, 'menu.operate', 'gm_data_000', 1, '', 'menu.operateDescribe');
 INSERT INTO `account_power` VALUES ('103107', 1, 1, 1, 0, 0, 0, 0, 'menu.room', 'gm_data_000', 2, '', 'menu.roomDescribe');
 INSERT INTO `account_power` VALUES ('103102', 1, 1, 1, 1, 0, 0, 0, 'menu.sale', 'gm_data_000', 2, '', 'menu.saleDescribe');
@@ -157,6 +158,7 @@ INSERT INTO `menu` VALUES ('102100', '/set', 'set', 'LAYOUT', '/set/base', '\r\n
 INSERT INTO `menu` VALUES ('102102', 'taginfo', 'tagInfo', '/taginfo/index', '', NULL, '102100', '选择设置', 'Selection Settings');
 INSERT INTO `menu` VALUES ('102103', 'park', 'park', '/park/index', '', NULL, '102100', '园区设置', 'Park Settings');
 INSERT INTO `menu` VALUES ('102104', 'operator', 'operator', '/operator/index', '', NULL, '102100', '操作人员', 'Operator');
+INSERT INTO `menu` VALUES ('102105', 'receiptConfig', 'receiptConfig', '/receiptConfig/index', '', NULL, '102100', '收据配制', 'receipt Config');
 INSERT INTO `menu` VALUES ('103100', '/operate', 'operate', 'LAYOUT', '/operate/base', 'assignment', '0', '墓区业务', 'Cemetery Business');
 INSERT INTO `menu` VALUES ('103107', 'room', 'room', '/room/index', '', NULL, '103100', '墓位设置', 'Cemetery Area Settings');
 INSERT INTO `menu` VALUES ('103102', 'sale', 'sale', '/sale/index', '', NULL, '103100', '墓区销售', 'Cemetery Sales');
@@ -425,6 +427,19 @@ CREATE TABLE `period_change` (
   `reason` varchar(100) DEFAULT NULL COMMENT '原因',
   PRIMARY KEY (`idChange`) USING BTREE
 ) ENGINE=InnoDB AUTO_INCREMENT=6000000 DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
+
+-- ----------------------------
+-- Table structure for receipt_config
+-- ----------------------------
+DROP TABLE IF EXISTS `receipt_config`;
+CREATE TABLE `receipt_config` (
+  `idConfig` bigint(20) NOT NULL AUTO_INCREMENT,
+  `prefix` varchar(40) DEFAULT NULL COMMENT '单据前缀',
+  `region` varchar(40) DEFAULT NULL COMMENT '区域名称',
+  `phone` varchar(40) DEFAULT '' COMMENT '账户电话',
+  `address` varchar(200) DEFAULT '' COMMENT '单位地址',
+  PRIMARY KEY (`idConfig`) USING BTREE
+) ENGINE=InnoDB AUTO_INCREMENT=183 DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
 
 -- ----------------------------
 -- Table structure for reserve

@@ -21,7 +21,8 @@ router.get('/power', async (req, res) => {
     try {
         await pool.query(sqlinsert, [idOperator, dataBaseName, idOperator]);
         const sql = `SELECT * FROM gm_data_000.account_power a, gm_data_000.operator_power b 
-        WHERE a.idMenu = b.idMenu and a.useMenu = 1 and a.dataBaseName = ? and b.idOperator = ? and a.isDeleted = 0`;
+        WHERE a.idMenu = b.idMenu and a.useMenu = 1 and a.dataBaseName = ? and b.idOperator = ? and a.isDeleted = 0
+        ORDER BY a.idMenu ASC`;
         const results = await pool.query(sql, [dataBaseName, idOperator]);
         return public.respondList(res, results);
     } catch (error) {

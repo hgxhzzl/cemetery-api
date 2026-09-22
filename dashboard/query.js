@@ -5,9 +5,9 @@ const public = require('../public');
 
 module.exports = router;
 
-// 首页统计聚合：4 卡片数值 + 按月×区域 + 本周销售明细列表 20260914 新增 20260915 修改
+// 首页统计聚合：4 卡片数值 + 按月×区域 + 今天与昨天销售明细列表 20260914 新增 20260915 修改 20260921 改今天与昨天
 // 口径：年销售/年收费按当年 createDate；年下葬数当年且 burialDate<=当天；预下葬数当年且 burialDate>当天；
-// 月销售数量当年 1-12 月；销售记录为本周（周一至周日）逐条明细，字段：区域/园区/编号/实际价格/购买人/日期
+// 月销售数量当年 1-12 月；销售记录为今天与昨天逐条明细，字段：区域/园区/编号/实际价格/购买人/日期
 // 4 卡片各配一个按区域分解数组（yearSalesByRegion 等），供卡片内小字行展示区域合计 20260915 新增
 router.get('/summary', async (req, res) => {
     const db = req.data.dataBase;
@@ -29,7 +29,7 @@ router.get('/summary', async (req, res) => {
         ]);
         // 第二批：周明细与按区域分解，与第一批错峰并发 20260917 修改
         const [weeklyRows, yearSalesRegionRows, yearFeesRegionRows, yearBuriedRegionRows, reservedBuriedRegionRows] = await Promise.all([
-            query(`SELECT a.idSale, r.region, r.park, r.xyNumber, a.realPrice, a.payer, DATE_FORMAT(a.createDate, '%Y-%m-%d') AS createDate FROM ${db}.sale a JOIN ${db}.room r ON a.idRoom = r.idRoom WHERE a.isDeleted = 0 AND a.createDate >= DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) DAY) AND a.createDate < DATE_ADD(DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) DAY), INTERVAL 7 DAY) ORDER BY a.createDate DESC, a.idSale DESC`, []),
+            query(`SELECT a.idSale, r.region, r.park, r.xyNumber, a.realPrice, a.payer, DATE_FORMAT(a.createDate, '%Y-%m-%d') AS createDate FROM ${db}.sale a JOIN ${db}.room r ON a.idRoom = r.idRoom WHERE a.isDeleted = 0 AND a.createDate >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND a.createDate < DATE_ADD(CURDATE(), INTERVAL 1 DAY) ORDER BY a.createDate DESC, a.idSale DESC`, []),
             query(`SELECT r.region, COALESCE(SUM(a.realPrice), 0) AS v FROM ${db}.sale a JOIN ${db}.room r ON a.idRoom = r.idRoom WHERE a.isDeleted = 0 AND a.createDate >= ? AND a.createDate < ? GROUP BY r.region ORDER BY r.region`, [yearStart, nextYearStart]),
             query(`SELECT r.region, COALESCE(SUM(a.payAmount), 0) AS v FROM ${db}.adminfee a JOIN ${db}.room r ON a.idRoom = r.idRoom WHERE a.isDeleted = 0 AND a.createDate >= ? AND a.createDate < ? GROUP BY r.region ORDER BY r.region`, [yearStart, nextYearStart]),
             query(`SELECT r.region, COUNT(*) AS v FROM ${db}.buried b JOIN ${db}.room r ON b.idRoom = r.idRoom WHERE b.isDeleted = 0 AND b.burialDate >= ? AND b.burialDate <= NOW() GROUP BY r.region ORDER BY r.region`, [yearStart]),

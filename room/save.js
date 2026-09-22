@@ -15,7 +15,8 @@ router.post('/insert', async (req, res) => {
   let table = req.data.dataBase+".room";
   let region = req.body.region;
   let park = req.body.park;
-  let sqlhave = `select yNum,xNum from ${table} where isDeleted = 0 and region = ? and park = ?`
+  // 已迁出的墓位坐标视为空位，允许新建（迁出后该位置可重新登记墓穴）20260921 新增
+let sqlhave = `select yNum,xNum from ${table} where isDeleted = 0 and region = ? and park = ? and (transferOutStatus IS NULL OR transferOutStatus <> 'statusType.transferOutStatusEnum.out')`
   let sqlList = [];
   try {
     const resultshave = await pool.query(sqlhave, [region, park]);
