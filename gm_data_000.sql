@@ -92,8 +92,8 @@ INSERT INTO `account_power` VALUES ('103104', 1, 1, 1, 1, 0, 0, 0, 'menu.reserve
 INSERT INTO `account_power` VALUES ('103105', 1, 1, 1, 1, 0, 0, 0, 'menu.contacts', 'gm_data_000', 2, '', 'menu.contactsDescribe');
 INSERT INTO `account_power` VALUES ('103106', 1, 1, 1, 1, 0, 0, 0, 'menu.transferOut', 'gm_data_000', 2, '', 'menu.transferOutDescribe');
 INSERT INTO `account_power` VALUES ('104100', 1, 0, 0, 0, 0, 0, 0, 'menu.fee', 'gm_data_000', 1, '', 'menu.feeDescribe');
-INSERT INTO `account_power` VALUES ('104101', 1, 1, 1, 1, 0, 0, 0, 'menu.admifee', 'gm_data_000', 2, '', 'menu.admifeeDescribe');
-INSERT INTO `account_power` VALUES ('104102', 1, 1, 1, 1, 0, 0, 0, 'menu.managementPeriod', 'gm_data_000', 2, '', 'menu.managementPeriodDescribe');
+INSERT INTO `account_power` VALUES ('103108', 1, 1, 1, 1, 0, 0, 0, 'menu.admifee', 'gm_data_000', 2, '', 'menu.admifeeDescribe');
+INSERT INTO `account_power` VALUES ('103109', 1, 0, 1, 0, 0, 0, 0, 'menu.managementPeriod', 'gm_data_000', 2, '', 'menu.managementPeriodDescribe');
 INSERT INTO `account_power` VALUES ('105100', 1, 0, 0, 0, 0, 0, 0, 'menu.query', 'gm_data_000', 1, '', 'menu.queryDescribe');
 INSERT INTO `account_power` VALUES ('105101', 1, 0, 0, 0, 0, 0, 0, 'menu.saleQuery', 'gm_data_000', 2, '', 'menu.saleQueryDescribe');
 INSERT INTO `account_power` VALUES ('105102', 1, 0, 0, 0, 0, 0, 0, 'menu.buriedQuery', 'gm_data_000', 2, '', 'menu.buriedQueryDescribe');
@@ -169,8 +169,8 @@ INSERT INTO `menu` VALUES ('103104', 'reserve', 'reserve', '/reserve/index', '',
 INSERT INTO `menu` VALUES ('103105', 'contacts', 'contacts', '/contacts/index', '', NULL, '103100', '墓位联系', 'Plot Contacts');
 INSERT INTO `menu` VALUES ('103106', 'transferOut', 'transferOut', '/transferOut/index', '', NULL, '103100', '墓位迁出', 'Plot Transfer Out');
 INSERT INTO `menu` VALUES ('104100', '/fee', 'fee', 'LAYOUT', '/fee/base', '\r\nalarm-add', '0', '收费管理', 'Fee Management');
-INSERT INTO `menu` VALUES ('104101', 'adminfee', 'adminfee', '/adminfee/index', '', NULL, '104100', '管理收款', 'Admin Fee Collection');
-INSERT INTO `menu` VALUES ('104102', 'managementPeriod', 'managementPeriod', '/managementPeriod/index', '', NULL, '104100', '管理期限', 'Management Period');
+INSERT INTO `menu` VALUES ('103108', 'adminfee', 'adminfee', '/adminfee/index', '', NULL, '103100', '管理费用收款', 'Admin Fee Collection');
+INSERT INTO `menu` VALUES ('103109', 'managementPeriod', 'managementPeriod', '/managementPeriod/index', '', NULL, '103100', '管理期限维护', 'Management Period');
 INSERT INTO `menu` VALUES ('105100', '/query', 'query', 'LAYOUT', '/query/base', '\r\nalarm-add', '0', '查询统计', 'Query Statistics');
 INSERT INTO `menu` VALUES ('105101', 'saleQuery', 'saleQuery', '/saleQuery/index', '', '\r\n', '105100', '墓区销售查询', 'Cemetery Sale Query');
 INSERT INTO `menu` VALUES ('105102', 'buriedQuery', 'buriedQuery', '/buriedQuery/index', '', '\r\n', '105100', '墓区下葬查询', 'Cemetery Burial Query');
@@ -244,8 +244,8 @@ INSERT INTO `operator_power` VALUES (100012, 1000, '103104', 1, 1, 1, 1, 0, 0, 0
 INSERT INTO `operator_power` VALUES (100013, 1000, '103105', 1, 1, 1, 1, 0, 0, 0);
 INSERT INTO `operator_power` VALUES (100014, 1000, '103106', 1, 1, 1, 1, 0, 0, 0);
 INSERT INTO `operator_power` VALUES (100015, 1000, '104100', 1, 0, 0, 0, 0, 0, 0);
-INSERT INTO `operator_power` VALUES (100016, 1000, '104101', 1, 1, 1, 1, 0, 0, 0);
-INSERT INTO `operator_power` VALUES (100017, 1000, '104102', 1, 0, 1, 0, 0, 0, 0);
+INSERT INTO `operator_power` VALUES (100016, 1000, '103108', 1, 1, 1, 1, 0, 0, 0);
+INSERT INTO `operator_power` VALUES (100017, 1000, '103109', 1, 0, 1, 0, 0, 0, 0);
 INSERT INTO `operator_power` VALUES (100018, 1000, '105100', 1, 0, 0, 0, 0, 0, 0);
 INSERT INTO `operator_power` VALUES (100019, 1000, '105101', 1, 0, 0, 0, 0, 0, 0);
 INSERT INTO `operator_power` VALUES (100020, 1000, '105102', 1, 0, 0, 0, 0, 0, 0);

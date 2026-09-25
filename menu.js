@@ -126,10 +126,9 @@ router.get('/', async (req, res) => {
         const conditionParams = [req.data.dataBase, req.data.userId];
         const menuRows = await pool.query(`SELECT * FROM gm_data_000.menu WHERE id in (${conditionSql}) ORDER BY id`, conditionParams);
         const menuTree = buildMenuTreeFromRows(menuRows);
-        // 墓位业务：8 个页面菜单按区域重组为"区域二级 + 页面三级"结构 20260923 修改,
-        await rebuildRegionMenus(menuTree, req.data.dataBase, 'operate', ['gravePlotBusiness', 'sale', 'buried', 'reserve', 'contacts', 'transferOut', 'room']);
-        // 收费管理：管理费用收款按区域重组（与墓位业务结构一致），管理期限维护不挂区域保持二级原位 20260923 修改,
-        await rebuildRegionMenus(menuTree, req.data.dataBase, 'fee', ['adminfee']);
+        // 墓位业务：10 个页面菜单按区域重组为"区域二级 + 页面三级"结构 20260923 修改,
+        // 管理费用收款/管理期限维护 20260925 自收费管理迁入墓位管理(菜单 id 103108/103109),一并挂到各区域下,
+        await rebuildRegionMenus(menuTree, req.data.dataBase, 'operate', ['gravePlotBusiness', 'sale', 'buried', 'reserve', 'contacts', 'transferOut', 'room', 'adminfee', 'managementPeriod']);
         return public.respondList(res, menuTree);
     } catch (error) {
         return public.handleQueryError(res, error);
