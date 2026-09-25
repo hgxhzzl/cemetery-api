@@ -71,32 +71,47 @@ async function fetchRegionTags(dataBaseName) {
     return pool.query(`SELECT id, tagName FROM ${dataBaseName}.taginfo WHERE tagType = 'region'`);
 }
 
-// 在指定一级菜单下动态追加区域三级菜单，每个区域一个入口，点击后携带区域打开对应页面 20260831 新增,
+// 在一级菜单下按区域重组子菜单：区域作为二级菜单，原二级页面菜单下沉为三级并携带区域信息 20260923 修改,
 // 路径段使用taginfo的id（ASCII），避免中文路径在vue-router中编码不一致导致刷新404；区域值经meta.region下发,
-// 标题为"区域+上级菜单名"，页签与菜单均取meta.title；二级菜单改名后三级菜单自动跟随 20260919 修改,
-async function appendRegionMenus(menuTree, dataBaseName, parentMenuName) {
-    const parentNode = findMenuNodeByName(menuTree, parentMenuName);
-    if (!parentNode) {
+// 三级页面节点保留原菜单id，前端按idMenu匹配页面按钮权限（usePermission）不受层级变化影响,
+// 不在 pageNames 内的二级菜单（如管理期限维护）保持原位不动 20260923 新增,
+async function rebuildRegionMenus(menuTree, dataBaseName, rootMenuName, pageNames) {
+    const rootNode = findMenuNodeByName(menuTree, rootMenuName);
+    if (!rootNode || !Array.isArray(rootNode.children)) {
         return;
     }
     try {
         const regions = await fetchRegionTags(dataBaseName);
-        if (regions.length > 0) {
-            // 后缀取二级菜单自身标题；英文后缀以字母开头时与区域名之间补空格（中英双语菜单） 20260919 修改,
-            const parentTitle = parentNode.meta?.title || {};
-            const zhSuffix = parentTitle.zh_CN || '';
-            const enSuffix = parentTitle.en_US || '';
-            const separator = /^[A-Za-z]/.test(enSuffix) ? ' ' : '';
-            parentNode.children = regions.map((item) => ({
-                path: `region-${item.id}`,
-                name: `${parentMenuName}-region-${item.id}`,
-                component: `/${parentMenuName}/index`,
-                meta: { title: { zh_CN: `${item.tagName}${zhSuffix}`, en_US: `${item.tagName}${separator}${enSuffix}` }, region: item.tagName },
-            }));
+        const pageMenus = rootNode.children.filter((page) => pageNames.includes(page.name));
+        if (regions.length === 0 || pageMenus.length === 0) {
+            return;
         }
+        const keptMenus = rootNode.children.filter((page) => !pageNames.includes(page.name));
+        rootNode.children = [
+            ...regions.map((item) => ({
+                path: `region-${item.id}`,
+                name: `${rootMenuName}-region-${item.id}`,
+                meta: { title: { zh_CN: item.tagName, en_US: item.tagName }, region: item.tagName },
+                children: pageMenus.map((page) => ({
+                    id: page.id,
+                    path: page.path,
+                    name: `${rootMenuName}-region-${item.id}-${page.name}`,
+                    component: page.component,
+                    // 三级标题带区域前缀（如"九泉山墓位销售"），区域二级+页面三级层级语义更完整 20260923 修改,
+                    meta: {
+                        title: {
+                            zh_CN: `${item.tagName}${page.meta?.title?.zh_CN ?? ''}`,
+                            en_US: `${item.tagName}${page.meta?.title?.en_US ?? page.meta?.title?.zh_CN ?? ''}`,
+                        },
+                        region: item.tagName,
+                    },
+                })),
+            })),
+            ...keptMenus,
+        ];
     } catch (error) {
         // 区域查询失败时保留原有菜单结构，不影响登录进入 20260831 新增,
-        console.log('appendRegionMenus failed:', parentMenuName, error.message);
+        console.log('rebuildRegionMenus failed:', rootMenuName, error.message);
     }
 }
 
@@ -111,17 +126,10 @@ router.get('/', async (req, res) => {
         const conditionParams = [req.data.dataBase, req.data.userId];
         const menuRows = await pool.query(`SELECT * FROM gm_data_000.menu WHERE id in (${conditionSql}) ORDER BY id`, conditionParams);
         const menuTree = buildMenuTreeFromRows(menuRows);
-        // 墓区设置、墓区销售、墓区下葬均按区域生成三级子菜单 20260831 修改,
-        await appendRegionMenus(menuTree, req.data.dataBase, 'room');
-        await appendRegionMenus(menuTree, req.data.dataBase, 'sale');
-        await appendRegionMenus(menuTree, req.data.dataBase, 'buried');
-        await appendRegionMenus(menuTree, req.data.dataBase, 'reserve');
-        // 管理费收款按区域生成三级子菜单，与墓区设置/销售/下葬/预定一致 20260909 新增,
-        await appendRegionMenus(menuTree, req.data.dataBase, 'adminfee');
-        // 墓位联系人按区域生成三级子菜单，与墓区设置/销售/下葬/预定/管理费收款一致 20260909 新增,
-        await appendRegionMenus(menuTree, req.data.dataBase, 'contacts');
-        // 墓位迁出按区域生成三级子菜单，与墓区下葬一致 20260916 新增,
-        await appendRegionMenus(menuTree, req.data.dataBase, 'transferOut');
+        // 墓位业务：8 个页面菜单按区域重组为"区域二级 + 页面三级"结构 20260923 修改,
+        await rebuildRegionMenus(menuTree, req.data.dataBase, 'operate', ['gravePlotBusiness', 'sale', 'buried', 'reserve', 'contacts', 'transferOut', 'room']);
+        // 收费管理：管理费用收款按区域重组（与墓位业务结构一致），管理期限维护不挂区域保持二级原位 20260923 修改,
+        await rebuildRegionMenus(menuTree, req.data.dataBase, 'fee', ['adminfee']);
         return public.respondList(res, menuTree);
     } catch (error) {
         return public.handleQueryError(res, error);

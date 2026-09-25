@@ -8,6 +8,7 @@ const bodyParser = require('body-parser');
 const vertoken = require('./token');
 const expressJwt = require('express-jwt');
 const loginState = require('./loginState');
+const device = require('./device');
 const config = require('./config');
 const requestContext = require('./requestContext');
 const public = require('./public');
@@ -55,9 +56,14 @@ const saleDeleteROutes = require('./sale/delete')
 const saleQueryROutes = require('./sale/query')
 //销售统计查询路径
 const saleQueryStatsRoutes = require('./saleQuery/query')
+//墓位业务路径(菜单 103101 墓位业务,数据表 graveplotbusiness,独立于销售) 20260923 新增
+const gravePlotBusinessSaveROutes = require('./gravePlotBusiness/save')
+const gravePlotBusinessDeleteROutes = require('./gravePlotBusiness/delete')
+const gravePlotBusinessQueryROutes = require('./gravePlotBusiness/query')
 const buriedQueryStatsRoutes = require('./buriedQuery/query')
 const adminfeeQueryStatsRoutes = require('./adminfeeQuery/query')
 const contactsQueryStatsRoutes = require('./contactsQuery/query')
+const roomQueryStatsRoutes = require('./roomQuery/query')
 //管理期限路径
 const managementPeriodRoutes = require('./managementPeriod/query')
 const managementPeriodSaveRoutes = require('./managementPeriod/save')
@@ -179,6 +185,8 @@ app.use(async function (req, res, next) {
   });
   
 app.use('/api/login',userRoutes);
+//设备白名单接口(登记/列表/停用,仅平台管理员可操作,路由层已有token认证) 20260924 新增,
+app.use('/api/device',device.router);
 app.use('/api/get-menu-list-i18n',menuROutes);
 
 //合同接口(菜单 101102 合同列表) 20260917 RBAC 接入,20260919 改按菜单 name 动态解析,
@@ -243,6 +251,14 @@ app.use('/api/sale-query', rbac.requirePowerByMenuName('sale'));
 app.use('/api/sale-save',saleSaveROutes);
 app.use('/api/sale-delete',saleDeleteROutes);
 app.use('/api/sale-query',saleQueryROutes);
+//墓位业务接口(菜单 103101 墓位业务) 20260923 新增,
+app.use('/api/gravePlotBusiness-save/insert', rbac.requirePowerByMenuName('gravePlotBusiness'));
+app.use('/api/gravePlotBusiness-save/update', rbac.requirePowerByMenuName('gravePlotBusiness'));
+app.use('/api/gravePlotBusiness-delete', rbac.requirePowerByMenuName('gravePlotBusiness'));
+app.use('/api/gravePlotBusiness-query', rbac.requirePowerByMenuName('gravePlotBusiness'));
+app.use('/api/gravePlotBusiness-save',gravePlotBusinessSaveROutes);
+app.use('/api/gravePlotBusiness-delete',gravePlotBusinessDeleteROutes);
+app.use('/api/gravePlotBusiness-query',gravePlotBusinessQueryROutes);
 //销售统计查询接口(菜单 105101/105102/105103/105104 查询统计) 20260919 改按菜单 name 动态解析,
 app.use('/api/saleQuery', rbac.requirePowerByMenuName('saleQuery'));
 app.use('/api/buriedQuery', rbac.requirePowerByMenuName('buriedQuery'));
@@ -252,6 +268,8 @@ app.use('/api/saleQuery',saleQueryStatsRoutes);
 app.use('/api/buriedQuery',buriedQueryStatsRoutes);
 app.use('/api/adminfeeQuery',adminfeeQueryStatsRoutes);
 app.use('/api/contactsQuery',contactsQueryStatsRoutes);
+app.use('/api/roomQuery', rbac.requirePowerByMenuName('roomQuery'));
+app.use('/api/roomQuery', roomQueryStatsRoutes);
 //管理期限接口(菜单 104102 管理期限) 20260919 改按菜单 name 动态解析,
 app.use('/api/managementPeriod-save/update', rbac.requirePowerByMenuName('managementPeriod'));
 app.use('/api/managementPeriod', rbac.requirePowerByMenuName('managementPeriod'));
@@ -313,7 +331,7 @@ if (config.securityFatal.length > 0) {
 }
 
 // 启动前幂等建表:确保登录态表 login_session 存在,线上老库缺表曾导致登录 500 20260917 修复,
-loginState.ensureTable().then(() => {
+Promise.all([loginState.ensureTable(), device.ensureTable()]).then(() => {
   app.listen(config.app.port, () => {
     console.log(`Server is running on port ${config.app.port}`);
     // 敏感配置默认值告警:生产环境务必通过环境变量覆盖 20260917 新增,

@@ -84,6 +84,7 @@ INSERT INTO `account_power` VALUES ('102103', 1, 0, 0, 0, 0, 0, 0, 'menu.park', 
 INSERT INTO `account_power` VALUES ('102104', 1, 1, 1, 1, 0, 0, 1, 'menu.operator', 'gm_data_000', 2, '', 'menu.operatorDescribe');
 INSERT INTO `account_power` VALUES ('102105', 1, 0, 0, 0, 0, 0, 0, 'menu.receiptConfig', 'gm_data_000', 2, '', 'menu.receiptConfigDescribe');
 INSERT INTO `account_power` VALUES ('103100', 1, 0, 0, 0, 0, 0, 0, 'menu.operate', 'gm_data_000', 1, '', 'menu.operateDescribe');
+INSERT INTO `account_power` VALUES ('103101', 1, 1, 1, 1, 0, 0, 0, 'menu.gravePlotBusiness', 'gm_data_000', 2, '', 'menu.gravePlotBusinessDescribe');
 INSERT INTO `account_power` VALUES ('103107', 1, 1, 1, 0, 0, 0, 0, 'menu.room', 'gm_data_000', 2, '', 'menu.roomDescribe');
 INSERT INTO `account_power` VALUES ('103102', 1, 1, 1, 1, 0, 0, 0, 'menu.sale', 'gm_data_000', 2, '', 'menu.saleDescribe');
 INSERT INTO `account_power` VALUES ('103103', 1, 1, 1, 1, 0, 0, 0, 'menu.buried', 'gm_data_000', 2, '', 'menu.buriedDescribe');
@@ -160,6 +161,7 @@ INSERT INTO `menu` VALUES ('102103', 'park', 'park', '/park/index', '', NULL, '1
 INSERT INTO `menu` VALUES ('102104', 'operator', 'operator', '/operator/index', '', NULL, '102100', '操作人员', 'Operator');
 INSERT INTO `menu` VALUES ('102105', 'receiptConfig', 'receiptConfig', '/receiptConfig/index', '', NULL, '102100', '收据配制', 'receipt Config');
 INSERT INTO `menu` VALUES ('103100', '/operate', 'operate', 'LAYOUT', '/operate/base', 'assignment', '0', '墓区业务', 'Cemetery Business');
+INSERT INTO `menu` VALUES ('103101', 'gravePlotBusiness', 'gravePlotBusiness', '/gravePlotBusiness/index', '', NULL, '103100', '墓位业务', 'Grave Plot Business');
 INSERT INTO `menu` VALUES ('103107', 'room', 'room', '/room/index', '', NULL, '103100', '墓位设置', 'Cemetery Area Settings');
 INSERT INTO `menu` VALUES ('103102', 'sale', 'sale', '/sale/index', '', NULL, '103100', '墓区销售', 'Cemetery Sales');
 INSERT INTO `menu` VALUES ('103103', 'buried', 'buried', '/buried/index', '', NULL, '103100', '墓区下葬', 'Cemetery Burials');
@@ -347,8 +349,6 @@ CREATE TABLE `sale` (
 
 
 
-
-
 -- ----------------------------
 -- Table structure for adminfee
 -- ----------------------------
@@ -380,6 +380,7 @@ CREATE TABLE `buried` (
   `idRoom` bigint(20) NOT NULL,
   `deceased` varchar(100) DEFAULT NULL COMMENT '安葬者',
   `deceasedIDCard` varchar(40) DEFAULT NULL COMMENT '安葬者身份证号',
+  `deceasedRelation` varchar(20) DEFAULT NULL COMMENT '逝者关系',
   `burialDate` datetime DEFAULT NULL COMMENT '下葬日期',
   `contacts` varchar(20) DEFAULT NULL COMMENT '联系人',
   `contactsphone` varchar(40) DEFAULT '' COMMENT '联系人电话',
@@ -493,5 +494,20 @@ CREATE TABLE `login_session` (
   `updateTime` datetime DEFAULT NULL COMMENT '更新时间',
   PRIMARY KEY (`phone`) USING BTREE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COMMENT='登录态会话表';
+
+-- ----------------------------
+-- Table structure for device
+-- ----------------------------
+DROP TABLE IF EXISTS `device`;
+CREATE TABLE `device` (
+  `idDevice` int NOT NULL AUTO_INCREMENT COMMENT '设备ID',
+  `deviceHash` varchar(64) NOT NULL COMMENT '设备哈希(SHA256:硬盘序列号+主板序列号+MachineGuid)',
+  `deviceName` varchar(100) DEFAULT NULL COMMENT '电脑名',
+  `useStatus` tinyint DEFAULT '1' COMMENT '启用状态:1启用/0停用',
+  `createDate` datetime DEFAULT NULL COMMENT '登记时间',
+  `updateDate` datetime DEFAULT NULL COMMENT '更新时间',
+  PRIMARY KEY (`idDevice`),
+  UNIQUE KEY `uk_deviceHash` (`deviceHash`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COMMENT='登录设备白名单表';
 
 SET FOREIGN_KEY_CHECKS = 1;

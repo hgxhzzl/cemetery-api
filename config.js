@@ -34,6 +34,10 @@ const config = {
     port: toNumber(process.env.PORT, 3000),
     corsOrigin: process.env.CORS_ORIGIN || 'http://localhost:3002',
   },
+  // 登录设备白名单总开关:默认开启,环境变量 DEVICE_CHECK_ENABLED=false 时整体关闭回退 20260924 新增,
+  deviceCheck: {
+    enabled: process.env.DEVICE_CHECK_ENABLED !== 'false',
+  },
   auth: {
     jwtSecret: process.env.JWT_SECRET,
     tokenExpiresIn: process.env.JWT_EXPIRES_IN || '12h',

@@ -3,6 +3,8 @@ const router = express.Router();
 const bublicfun = require('./public.js');
 const getToken = require('./token.js');
 const loginState = require('./loginState');
+const device = require('./device');
+const config = require('./config');
 // 创建 MySQL 连接池
 const pool = require('./database.js');
 
@@ -33,6 +35,14 @@ router.post('/', async (req, res) => {
         pool.query('UPDATE gm_data_000.operator SET password = ? WHERE idOperator = ?', [hashed, user.userid], () => {});
       }).catch(() => {});
     }
+    // 设备白名单校验:普通操作员必须在指定电脑登录;平台管理员(isAccount=1)豁免,保证白名单故障时有救场通道 20260924 新增,
+    if (config.deviceCheck.enabled && Number(user.isAccount) !== 1) {
+      const deviceHash = String(req.body.deviceHash || '');
+      const allowed = deviceHash && (await device.isDeviceAllowed(deviceHash));
+      if (!allowed) {
+        return res.status(403).json({ code: 403, message: '当前电脑未授权登录，请使用单位指定电脑' });
+      }
+    }
     // 生成 JWT 令牌
     const userid = user.userid;
     const userName = user.username;
@@ -49,6 +59,8 @@ router.post('/', async (req, res) => {
     json.userName = userName;
     json.userPhone = phone;
     json.userId = user.userid;
+    // isAccount 透传给前端保存(0普通操作员/1平台管理员) 20260924 新增,
+    json.isAccount = Number(user.isAccount);
     json.userInfo = {roles:[]};
     // roles 附带菜单 name(menuName),前端按稳定 name 匹配权限,菜单 id 因排序调整变化时不需改代码 20260919 修复,
     const sql = 'SELECT a.*, m.name AS menuName FROM gm_data_000.operator_power a LEFT JOIN gm_data_000.menu m ON m.id = a.idMenu WHERE a.idOperator = ?';

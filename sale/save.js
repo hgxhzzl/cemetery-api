@@ -25,6 +25,12 @@ router.post('/insert', async (req, res) => {
   req.body.realPrice = price;
   delete req.body.realPriceString;
 
+  // sale 表无联系人列,剔除前端随单提交的联系人字段,联系人由下方 contacts 表语句单独同步 20260924 修复,
+  delete req.body.contacts;
+  delete req.body.contactsphone;
+  delete req.body.contactsPhone;
+  delete req.body.contactsIDCard;
+
   delete req.body.idSale;
 
   var sql = public.getInsertStatement(req.body);
@@ -79,6 +85,13 @@ router.post('/update', async (req, res) => {
   req.body.table = req.data.dataBase + '.sale';
   req.body.operator = req.data.userName;
   delete req.body.realPriceString;
+
+  // sale 表无联系人列,剔除前端随单提交的联系人字段,联系人由下方 contacts 表语句单独同步 20260924 修复,
+  delete req.body.contacts;
+  delete req.body.contactsphone;
+  delete req.body.contactsPhone;
+  delete req.body.contactsIDCard;
+
   //处理id
   req.body.idfield = 'idSale';
   req.body.idvalue = idSale;
