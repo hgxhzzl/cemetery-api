@@ -29,7 +29,8 @@ router.get('/', async (req, res,next) => {
         }
 
         const contractName = req.query.contractName;
-        const table = "SELECT *  FROM " + req.data.dataBase + ".contract Where isDeleted = 0 ";
+        // 合同改为全局共享,表固定 gm_data_000.contract 20260926 修正,
+        const table = "SELECT *  FROM gm_data_000.contract Where isDeleted = 0 ";
         const contractItems = await all(table, idContract, contractName);
         return public.respondList(res, contractItems);
     } catch (error) {

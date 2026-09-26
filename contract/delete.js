@@ -11,7 +11,8 @@ router.get('/', async (req, res) => {
   }
 
   let body = {};
-  body.table = req.data.dataBase+".contract";
+  // 合同改为全局共享,表固定 gm_data_000.contract 20260926 修正,
+  body.table = "gm_data_000.contract";
   body.operator = req.data.userName;
   body.idfield ="idContract";
   body.idvalue = idContract;

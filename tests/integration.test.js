@@ -68,7 +68,7 @@ test('sale/delete: 软删销售 + 墓位回置未销售(清空buyer) + 软删联
     assert.ok(sqls[0].includes('SELECT payer'));
     // 2. 软删 sale:条件参数化
     assert.ok(sqls.some((sql) => sql.includes('gm_data_001.sale set') && sql.includes('idRoom = ? AND isDeleted = 0')));
-    // 3. 墓位回置未销售 + 清空购买人(值在 params 中)
+    // 3. 墓位回置未销售 + 清空购墓人(值在 params 中)
     const roomUpdate = calls.find((call) => call.sql.includes('gm_data_001.room set'));
     assert.ok(roomUpdate);
     assert.ok(roomUpdate.params.includes('statusType.saleStatusEnum.unsold'));

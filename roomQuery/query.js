@@ -32,10 +32,10 @@ router.get('/list', async (req, res) => {
         conditions.push('s.createDate <= ?');
         params.push(`${endDate.slice(0, 10)} 23:59:59`);
     }
-    // 关键词：按墓区编号/购买人/联系人/电话/安葬者拼串包含查找 20260924 新增,
+    // 关键词：按墓区编号/购墓人/联系人组合(姓名+电话)/购墓人电话/安葬者拼串包含查找 20260926 修改,
     const keyword = String(req.query.keyword || '').trim();
     if (keyword) {
-        conditions.push("CONCAT(COALESCE(r.xyNumber,''),COALESCE(r.buyer,''),COALESCE(r.contacts,''),COALESCE(s.payerPhone,''),COALESCE(r.deceased,'')) LIKE ?");
+        conditions.push("CONCAT(COALESCE(r.xyNumber,''),COALESCE(r.buyer,''),COALESCE(c.contactsGroup,''),COALESCE(s.payerPhone,''),COALESCE(r.deceased,'')) LIKE ?");
         params.push(`%${keyword}%`);
     }
 
@@ -63,7 +63,9 @@ router.get('/list', async (req, res) => {
     const whereSql = conditions.join(' AND ');
 
     const countSql = `SELECT COUNT(*) AS total
-    FROM ${req.data.dataBase}.room r LEFT JOIN ${req.data.dataBase}.sale s ON s.idRoom = r.idRoom AND s.isDeleted = 0
+    FROM ${req.data.dataBase}.room r
+    LEFT JOIN ${req.data.dataBase}.sale s ON s.idRoom = r.idRoom AND s.isDeleted = 0
+    LEFT JOIN (SELECT idRoom, GROUP_CONCAT(CONCAT(contacts, contactsPhone) SEPARATOR ' ') AS contactsGroup FROM ${req.data.dataBase}.contacts WHERE isDeleted = 0 GROUP BY idRoom) c ON c.idRoom = r.idRoom
     WHERE ${whereSql}`;
 
     try {
@@ -71,8 +73,11 @@ router.get('/list', async (req, res) => {
         const total = countResults[0].total;
 
         // 选择销售日期范围时未销售墓位不满足 s.createDate 条件被自然排除，未选范围时展示全部墓位 20260924 新增
-        const dataSql = `SELECT r.idRoom, r.region, r.park, r.xyNumber, r.buyer, s.payerPhone, s.createDate, r.deceased, r.contacts, r.transferOutStatus
-    FROM ${req.data.dataBase}.room r LEFT JOIN ${req.data.dataBase}.sale s ON s.idRoom = r.idRoom AND s.isDeleted = 0
+        // 联系人列改为 contacts 表组合：每条“姓名+电话”，多联系人空格分隔（替换原 room.contacts 冗余字段）20260926 修改
+        const dataSql = `SELECT r.idRoom, r.region, r.park, r.xyNumber, r.buyer, s.payerPhone, s.createDate, r.deceased, COALESCE(c.contactsGroup, '') AS contacts, r.transferOutStatus
+    FROM ${req.data.dataBase}.room r
+    LEFT JOIN ${req.data.dataBase}.sale s ON s.idRoom = r.idRoom AND s.isDeleted = 0
+    LEFT JOIN (SELECT idRoom, GROUP_CONCAT(CONCAT(contacts, contactsPhone) SEPARATOR ' ') AS contactsGroup FROM ${req.data.dataBase}.contacts WHERE isDeleted = 0 GROUP BY idRoom) c ON c.idRoom = r.idRoom
     WHERE ${whereSql}
     ORDER BY r.idRoom DESC
     LIMIT ? OFFSET ?`;

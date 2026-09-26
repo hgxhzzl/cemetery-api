@@ -84,7 +84,7 @@ router.post('/insert', async (req, res) => {
   delete req.body.type;
 
   // 销售形态:落 sale 表,同步 room 置已销售+buyer/cardno,付款人非空时同步新增 contacts 联系人,
-  // 并向 buried 新增一条下葬记录(安葬者三字段+购买人映射,同事务,不联动下葬状态机) 20260923 修改,
+  // 并向 buried 新增一条下葬记录(安葬者三字段+购墓人映射,同事务,不联动下葬状态机) 20260923 修改,
   if (type === 'sale') {
     // 安葬者三字段属 buried 表,先捕获供 buried 插入,避免混入 sale 插入字段 20260923 新增,
     const deceased = req.body.deceased;
@@ -364,7 +364,7 @@ router.post('/update', async (req, res) => {
         sqlList.push(public.getUpdateByConditionStatement(roomJson));
       }
 
-      // buried 同步:条件同 idRoom+idSale——有对应活动记录则更新安葬者三字段+购买人三字段;
+      // buried 同步:条件同 idRoom+idSale——有对应活动记录则更新安葬者三字段+购墓人三字段;
       // 无对应记录且本次填写了安葬信息(安葬者/下葬日期/身份证号任一非空)则补插一条,避免信息丢失;
       // 全空且无记录则跳过 20260923 新增,
       if (idRoom !== null) {

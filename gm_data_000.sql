@@ -319,7 +319,7 @@ CREATE TABLE `room` (
   `createDate` datetime DEFAULT NULL COMMENT '创建日期',
   `modifyDate` datetime DEFAULT NULL COMMENT '修改日期',
   `isDeleted` smallint(1) unsigned zerofill DEFAULT '0' COMMENT '是否删除',
-  `buyer` varchar(20) DEFAULT NULL COMMENT '购买人',
+  `buyer` varchar(20) DEFAULT NULL COMMENT '购墓人',
   `deceased` varchar(100) DEFAULT NULL COMMENT '安葬者',
   `contacts` varchar(200) DEFAULT NULL COMMENT '联系人',
   `transferOutStatus` varchar(100) DEFAULT NULL COMMENT '迁出状态',

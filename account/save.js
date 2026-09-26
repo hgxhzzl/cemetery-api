@@ -135,8 +135,9 @@ router.post('/createDataBase', async (req, res) => {
     return public.handleQueryError(res, error);
   }
 
-  // 全局表(仅存在于模板库,业务库不复制);contract 为每租户业务表,业务库复制 20260917 修正,
-  const globalTables = ['account', 'account_power', 'menu', 'operator', 'operator_power', 'login_session'];
+  // 全局表(仅存在于模板库,业务库不复制);contract/device 均为全局表,业务库不复制 20260926 修正,
+  const globalTables = ['account', 'account_power', 'menu', 'operator',
+     'operator_power', 'login_session', 'contract','device'];
 
   // 从 information_schema 动态读取模板库实有表/视图,替代手写 tableDefinitions 清单,
   // 新增业务表无需再手动维护,由模板库结构自动同步 20260917 动态对齐,
