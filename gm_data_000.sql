@@ -430,6 +430,34 @@ CREATE TABLE `period_change` (
 ) ENGINE=InnoDB AUTO_INCREMENT=6000000 DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
 
 -- ----------------------------
+-- Table structure for burial_cert
+-- ----------------------------
+DROP TABLE IF EXISTS `burial_cert`;
+CREATE TABLE `burial_cert` (
+  `idCert` bigint(20) NOT NULL AUTO_INCREMENT,
+  `idRoom` bigint(20) NOT NULL,
+  `serialNo` varchar(6) DEFAULT NULL COMMENT '编号',
+  `certHolder` varchar(20) DEFAULT NULL COMMENT '持证人',
+  `certHolderPhone` varchar(40) DEFAULT '' COMMENT '持证人电话',
+  `deceasedRelation` varchar(20) DEFAULT NULL COMMENT '逝者关系',
+  `burialDate` datetime DEFAULT NULL COMMENT '下葬日期',
+  `jointBurialDate` datetime DEFAULT NULL COMMENT '合葬日期',
+  `isDeleted` smallint(1) unsigned zerofill NOT NULL DEFAULT '0' COMMENT '是否删除',
+  `deceasedA` varchar(100) DEFAULT NULL COMMENT '安葬者A',
+  `deceasedB` varchar(100) DEFAULT NULL COMMENT '安葬者B',
+  `deceasedC` varchar(100) DEFAULT NULL COMMENT '安葬者C',
+  `deceasedD` varchar(100) DEFAULT NULL COMMENT '安葬者D',
+  `workplace` varchar(100) DEFAULT NULL COMMENT '工作单位',
+  `workPhone` varchar(20) DEFAULT NULL COMMENT '单位电话',
+  `homeAddress` varchar(100) DEFAULT NULL COMMENT '住址',
+  `operator` varchar(40) DEFAULT '' COMMENT '操作人名',
+  `createDate` datetime DEFAULT NULL COMMENT '创建日期',
+  `modifyDate` datetime DEFAULT NULL COMMENT '修改日期',
+  `equalDivision` smallint(1) DEFAULT NULL COMMENT '等分',
+  PRIMARY KEY (`idCert`) USING BTREE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
+
+-- ----------------------------
 -- Table structure for receipt_config
 -- ----------------------------
 DROP TABLE IF EXISTS `receipt_config`;

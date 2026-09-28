@@ -7,7 +7,8 @@ module.exports = router;
 // 墓位业务保存:代码独立于 sale/reserve/buried 模块,但数据表复用原有业务表——
 // type=sale 落 sale 表+联动 buried/room/contacts, type=reserve 落 reserve 表(联动墓位状态),
 // type=buried 落 buried 表(锚定管理费日期/置已下葬/deceased 聚合/联系人同步,同下葬页登记),
-// 默认落 graveplotbusiness 本业务表 20260923 修改,
+// type=certificate 落 burial_cert 表(安葬证设置,仅本表不联动),
+// 默认落 graveplotbusiness 本业务表 20260923 修改 20260927 修改,
 
 // 构建联系人同步语句:同墓位活动联系人按 名/电话 匹配,联系人名/电话/身份证号一并同步
 // (复制自下葬页逻辑,代码独立;同名存在且电话/身份证号有变化则更新;同名不存在但同电话存在则更新联系人名与身份证号;
@@ -262,6 +263,28 @@ router.post('/insert', async (req, res) => {
 
     const statement = public.getInsertStatement(req.body);
     return public.Transaction([statement, public.getRoomContactsSyncSql(req.data.dataBase, idRoom)], res);
+  }
+
+  // 安葬证设置形态:落 burial_cert 表,仅插入本表不联动(参照墓位销售方式,字段先行清理) 20260927 新增,
+  if (type === 'certificate') {
+    delete req.body.payer;
+    delete req.body.payerPhone;
+    delete req.body.payerIDCard;
+    delete req.body.realPrice;
+    delete req.body.realPriceString;
+    delete req.body.payee;
+    delete req.body.deceased;
+    delete req.body.deceasedIDCard;
+    delete req.body.contacts;
+    delete req.body.contactsphone;
+    delete req.body.contactsIDCard;
+    delete req.body.idBusiness;
+
+    req.body.table = req.data.dataBase + '.burial_cert';
+    req.body.operator = req.data.userName;
+
+    const sql = public.getInsertStatement(req.body);
+    return public.Transaction([sql], res);
   }
 
   // 默认(业务形态):仅插入本业务表,不联动 room 状态与 contacts 20260923 新增,
@@ -578,6 +601,37 @@ router.post('/update', async (req, res) => {
 
     const statement = public.getUpdateByIdStatement(req.body);
     return public.Transaction([statement, public.getRoomContactsSyncSql(req.data.dataBase, idRoom)], res);
+  }
+
+  // 安葬证设置形态:按 idCert(idBusiness) 更新 burial_cert 本表,仅更新不联动 20260927 新增,
+  if (type === 'certificate') {
+    const idCert = public.parseNumericParam(req.body.idBusiness);
+    if (idCert === null) {
+      return res.status(400).json({ error: 'idBusiness参数错误!' });
+    }
+
+    delete req.body.payer;
+    delete req.body.payerPhone;
+    delete req.body.payerIDCard;
+    delete req.body.realPrice;
+    delete req.body.realPriceString;
+    delete req.body.payee;
+    delete req.body.deceased;
+    delete req.body.deceasedIDCard;
+    delete req.body.contacts;
+    delete req.body.contactsphone;
+    delete req.body.contactsIDCard;
+    // 墓位不变,无需更新外键 idRoom
+    delete req.body.idRoom;
+
+    req.body.table = req.data.dataBase + '.burial_cert';
+    req.body.operator = req.data.userName;
+    req.body.idfield = 'idCert';
+    req.body.idvalue = idCert;
+    delete req.body.idBusiness;
+
+    const statement = public.getUpdateByIdStatement(req.body);
+    return public.Transaction([statement], res);
   }
 
   // 默认(业务形态):仅更新本业务表 20260923 新增,

@@ -8,7 +8,8 @@ module.exports = router;
 // type=sale 查 sale 表并 LEFT JOIN buried(条件同 idSale)带出安葬者/下葬日期/安葬者身份证号/逝者关系,
 //   有对应 buried 记录则带入,无则为空;主键 idSale 别名 idBusiness 供前端判定新建/修改;
 // type=reserve 查 reserve 表(liaison/liaisonPhone 映射为 payer/payerPhone),
-// 默认查 graveplotbusiness 本业务表 20260923 修改,
+// type=certificate 查 burial_cert 表安葬证设置记录(倒序取最新一条),
+// 默认查 graveplotbusiness 本业务表 20260923 修改 20260927 修改,
 router.get('/get-by-room', async (req, res) => {
   const idRoom = public.parseNumericParam(req.query.idRoom);
   if (idRoom === null) {
@@ -28,6 +29,9 @@ router.get('/get-by-room', async (req, res) => {
   } else if (type === 'reserve') {
     sql = `SELECT idReserve AS idBusiness, idRoom, liaison AS payer, liaisonPhone AS payerPhone, remark, createDate
       FROM ${req.data.dataBase}.reserve WHERE idRoom = ? AND isDeleted = 0`;
+  } else if (type === 'certificate') {
+    // 安葬证设置形态:查 burial_cert 表活动记录(倒序,前端取最新一条回填),主键别名 idBusiness 20260927 新增,
+    sql = `SELECT *, idCert AS idBusiness FROM ${req.data.dataBase}.burial_cert WHERE idRoom = ? AND isDeleted = 0 ORDER BY idCert DESC`;
   } else {
     sql = `SELECT * FROM ${req.data.dataBase}.graveplotbusiness WHERE idRoom = ? AND isDeleted = 0`;
   }
