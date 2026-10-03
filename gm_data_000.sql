@@ -324,6 +324,7 @@ CREATE TABLE `room` (
   `deceased` varchar(100) DEFAULT NULL COMMENT '安葬者',
   `contacts` varchar(200) DEFAULT NULL COMMENT '联系人',
   `transferOutStatus` varchar(100) DEFAULT NULL COMMENT '迁出状态',
+  `remark` varchar(50) DEFAULT NULL COMMENT '备注',
   PRIMARY KEY (`idRoom`) USING BTREE
 ) ENGINE=InnoDB AUTO_INCREMENT=1000000 DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
 
