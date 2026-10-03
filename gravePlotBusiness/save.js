@@ -8,7 +8,8 @@ module.exports = router;
 // type=sale 落 sale 表+联动 buried/room/contacts, type=reserve 落 reserve 表(联动墓位状态),
 // type=buried 落 buried 表(锚定管理费日期/置已下葬/deceased 聚合/联系人同步,同下葬页登记),
 // type=certificate 落 burial_cert 表(安葬证设置,仅本表不联动),
-// 默认落 graveplotbusiness 本业务表 20260923 修改 20260927 修改,
+// type=remark 直接更新 room.remark(墓位备注,仅本列不联动),
+// 默认落 graveplotbusiness 本业务表 20260923 修改 20260927 修改 20261002 修改,
 
 // 构建联系人同步语句:同墓位活动联系人按 名/电话 匹配,联系人名/电话/身份证号一并同步
 // (复制自下葬页逻辑,代码独立;同名存在且电话/身份证号有变化则更新;同名不存在但同电话存在则更新联系人名与身份证号;
@@ -84,7 +85,7 @@ router.post('/insert', async (req, res) => {
   const type = req.body.type;
   delete req.body.type;
 
-  // 销售形态:落 sale 表,同步 room 置已销售+buyer/cardno,付款人非空时同步新增 contacts 联系人,
+  // 销售形态:落 sale 表,同步 room 置已销售+buyer/serialNo,付款人非空时同步新增 contacts 联系人,
   // 并向 buried 新增一条下葬记录(安葬者三字段+购墓人映射,同事务,不联动下葬状态机) 20260923 修改,
   if (type === 'sale') {
     // 安葬者三字段属 buried 表,先捕获供 buried 插入,避免混入 sale 插入字段 20260923 新增,
@@ -139,7 +140,7 @@ router.post('/insert', async (req, res) => {
     json.idvalue = idRoom;
     json.saleStatus = 'statusType.saleStatusEnum.sold';
     json.buyer = payer === undefined || payer === null ? '' : payer;
-    json.cardno = serialNo === undefined || serialNo === null ? '' : serialNo;
+    json.serialNo = serialNo === undefined || serialNo === null ? '' : serialNo;
     var sqlRoom = public.getUpdateByIdStatement(json);
     sqlList.push(sqlRoom);
 
@@ -307,7 +308,7 @@ router.post('/insert', async (req, res) => {
   return public.Transaction([sql], res);
 });
 
-// 修改墓位业务:按 type 更新对应业务表——销售形态同步 contacts 联系人/room.buyer/cardno,
+// 修改墓位业务:按 type 更新对应业务表——销售形态同步 contacts 联系人/room.buyer/serialNo,
 // 并同步 buried 记录(条件同 idRoom+idSale:有则更新,无且填写了安葬信息则插入);
 // 预定形态仅更新记录字段;下葬形态同步锚定/聚合/联系人(同下葬页修改);默认本业务表 20260923 修改,
 router.post('/update', async (req, res) => {
@@ -315,7 +316,7 @@ router.post('/update', async (req, res) => {
   const type = req.body.type;
   delete req.body.type;
 
-  // 销售形态:更新 sale 记录,先取修改前旧付款人/墓位用于定位同步 contacts 联系人与 room.buyer/cardno 20260923 修改,
+  // 销售形态:更新 sale 记录,先取修改前旧付款人/墓位用于定位同步 contacts 联系人与 room.buyer/serialNo 20260923 修改,
   if (type === 'sale') {
     const idSale = public.parseNumericParam(req.body.idBusiness);
     if (idSale === null) {
@@ -381,7 +382,7 @@ router.post('/update', async (req, res) => {
           table: req.data.dataBase + '.room',
           condition: { sql: 'idRoom = ? AND isDeleted = 0', params: [idRoom] },
           buyer: payer === undefined || payer === null ? '' : payer,
-          cardno: serialNo === undefined || serialNo === null ? '' : serialNo,
+          serialNo: serialNo === undefined || serialNo === null ? '' : serialNo,
           operator: req.data.userName,
         };
         sqlList.push(public.getUpdateByConditionStatement(roomJson));
@@ -601,6 +602,24 @@ router.post('/update', async (req, res) => {
 
     const statement = public.getUpdateByIdStatement(req.body);
     return public.Transaction([statement, public.getRoomContactsSyncSql(req.data.dataBase, idRoom)], res);
+  }
+
+  // 墓位备注形态:直接更新 room.remark 本列,不联动其他表(墓位备注页单字段编辑) 20261002 新增,
+  if (type === 'remark') {
+    const idRoomRemark = public.parseNumericParam(req.body.idRoom);
+    if (idRoomRemark === null) {
+      return res.status(400).json({ error: 'idRoom参数错误!' });
+    }
+
+    const json = {
+      table: req.data.dataBase + '.room',
+      operator: req.data.userName,
+      idfield: 'idRoom',
+      idvalue: idRoomRemark,
+      remark: req.body.remark === undefined || req.body.remark === null ? '' : String(req.body.remark),
+    };
+    const statement = public.getUpdateByIdStatement(json);
+    return public.Transaction([statement], res);
   }
 
   // 安葬证设置形态:按 idCert(idBusiness) 更新 burial_cert 本表,仅更新不联动 20260927 新增,

@@ -272,13 +272,14 @@ DROP TABLE IF EXISTS `tagset`;
 CREATE TABLE `tagset` (
   `dutiesNumber` smallint(6) DEFAULT NULL,
   `teamNumber` smallint(6) DEFAULT NULL,
+  `deceasedRelationNumber` smallint(6) DEFAULT NULL,
   `regionNumber` smallint(6) DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
 
 -- ----------------------------
 -- Records of tagset
 -- ----------------------------
-INSERT INTO `tagset` VALUES (2, 3, 4);
+INSERT INTO `tagset` VALUES (2, 3, 5, 4);
 
 
 -- ----------------------------
@@ -312,7 +313,7 @@ CREATE TABLE `room` (
   `saleStatus` varchar(100) DEFAULT NULL COMMENT '销售状态',
   `repairStatus` varchar(100) DEFAULT NULL COMMENT '修复状态',
   `intoStatus` varchar(100) DEFAULT NULL COMMENT '入住状态',
-  `cardno` varchar(40) DEFAULT '' COMMENT '卡号',
+  `serialNo` varchar(40) DEFAULT '' COMMENT '编号',
   `startDate` datetime DEFAULT NULL COMMENT '开始日期',
   `endDate` datetime DEFAULT NULL COMMENT '结束日期',
   `operator` varchar(40) DEFAULT '' COMMENT '操作人名',
