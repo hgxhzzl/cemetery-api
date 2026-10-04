@@ -101,11 +101,47 @@ function requirePowerByAnyMenuName(...menuNames) {
   };
 }
 
+// 共用详情页(room-detail)取数放行:打开详情需并行拉 6 类数据(room/预定/销售/下葬/管理费/联系人),
+// 它们分属 6 个业务菜单接口前缀。若逐个按自身菜单校验,只开通部分模块的租户点详情会整批 403,
+// 而前端 Promise.all 一遇失败即静默放弃(详情视图不出现且无任何提示),表现为"点详情没反应"。
+// 口径统一为:调用"详情专用取数路径"时,只要具备任一含详情页功能菜单的 useMenu 即放行,
+// 各页卡片列表(/room /canSale /parkTree /room?park=region= 等)仍按自身菜单严格校验 20261004 修改,
+const DETAIL_PAGE_MENUS = [
+  'room', 'sale', 'buried', 'reserve', 'contacts', 'adminfee', 'transferOut',
+  'gravePlotBusiness', 'managementPeriod',
+  'roomQuery', 'saleQuery', 'buriedQuery', 'adminfeeQuery', 'contactsQuery', 'transferOutQuery',
+];
+
+// 详情专用路径判定:req.path 已被 express 剥掉挂载前缀,
+// /idList = room-query 单墓位;/get-by-room = sale/reserve 活动记录;
+// 裸 / 且仅带 idRoom = buried/contacts/adminfee 的该墓位记录列表(带 park/region 的卡片列表不算)20261004 新增,
+function isDetailAggregateRequest(req) {
+  const path = String(req.path || '');
+  if (path === '/idList' || path === '/get-by-room') {
+    return true;
+  }
+  const query = req.query || {};
+  return (path === '/' || path === '') && !!query.idRoom && !query.park && !query.region;
+}
+
+// query 前缀守卫:详情取数路径按"任一详情页菜单"放行,其余路径维持单菜单严格校验 20261004 新增,
+function requireQueryPowerWithDetail(menuName) {
+  const pagePower = requirePowerByMenuName(menuName);
+  const detailPower = requirePowerByAnyMenuName(...DETAIL_PAGE_MENUS);
+  return function (req, res, next) {
+    if (isDetailAggregateRequest(req)) {
+      return detailPower(req, res, next);
+    }
+    return pagePower(req, res, next);
+  };
+}
+
 module.exports = {
   isPlatformAdmin,
   requirePlatformAdmin,
   requirePower,
   requirePowerByMenuName,
   requirePowerByAnyMenuName,
+  requireQueryPowerWithDetail,
 };
 

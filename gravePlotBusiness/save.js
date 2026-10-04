@@ -122,14 +122,16 @@ router.post('/insert', async (req, res) => {
     sqlList.push(sql);
     // 捕获 sale 新插入记录的 idSale(同连接),供 buried 插入引用 20260923 新增,
     sqlList.push('SET @idSale = LAST_INSERT_ID()');
+    // buried 记录为手写 INSERT,不走 getInsertStatement 自动补全,显式补 createDate/modifyDate 20261004 新增,
+    const buriedDate = public.getCurrentDateTime();
     sqlList.push({
-      sql: `INSERT INTO ${req.data.dataBase}.buried (idRoom, idSale, deceased, burialDate, deceasedIDCard, deceasedRelation, contacts, contactsphone, contactsIDCard, operator)
-        VALUES (?, @idSale, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      sql: `INSERT INTO ${req.data.dataBase}.buried (idRoom, idSale, deceased, burialDate, deceasedIDCard, deceasedRelation, contacts, contactsphone, contactsIDCard, operator, createDate, modifyDate)
+        VALUES (?, @idSale, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       params: [idRoom, deceased, burialDate, deceasedIDCard, deceasedRelation,
         payer === undefined || payer === null ? '' : payer,
         payerPhone === undefined || payerPhone === null ? '' : payerPhone,
         payerIDCard === undefined || payerIDCard === null ? '' : payerIDCard,
-        req.data.userName],
+        req.data.userName, buriedDate, buriedDate],
     });
     // room.deceased 聚合同步:活动下葬记录 deceased 空格分隔同步到 room.deceased(逻辑同下葬页新增),随事务一致 20260923 新增,
     sqlList.push(public.getRoomDeceasedSyncSql(req.data.dataBase, idRoom));
@@ -143,6 +145,15 @@ router.post('/insert', async (req, res) => {
     json.serialNo = serialNo === undefined || serialNo === null ? '' : serialNo;
     var sqlRoom = public.getUpdateByIdStatement(json);
     sqlList.push(sqlRoom);
+
+    // 下葬日期非空时同步墓位管理费日期与下葬状态:startDate=burialDate;endDate 仅在为空时取 burialDate;intoStatus 置已下葬(销带下葬场景补齐) 20261004 新增,
+    const burialDateValid = burialDate !== undefined && burialDate !== null && String(burialDate).trim() !== '';
+    if (burialDateValid) {
+      sqlList.push({
+        sql: `update ${req.data.dataBase}.room set startDate = ?, endDate = coalesce(endDate, ?), intoStatus = ? where idRoom = ?`,
+        params: [burialDate, burialDate, 'statusType.intoStatusEnum.buried', idRoom],
+      });
+    }
 
     if (payer !== undefined && payer !== null && String(payer).trim() !== '') {
       const contactsJson = {
