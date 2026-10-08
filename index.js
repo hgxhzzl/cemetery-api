@@ -60,6 +60,7 @@ const saleQueryStatsRoutes = require('./saleQuery/query')
 const gravePlotBusinessSaveROutes = require('./gravePlotBusiness/save')
 const gravePlotBusinessDeleteROutes = require('./gravePlotBusiness/delete')
 const gravePlotBusinessQueryROutes = require('./gravePlotBusiness/query')
+const gravePlotBusinessCancelSaleROutes = require("./gravePlotBusiness/cancelSale")
 const buriedQueryStatsRoutes = require('./buriedQuery/query')
 const adminfeeQueryStatsRoutes = require('./adminfeeQuery/query')
 const contactsQueryStatsRoutes = require('./contactsQuery/query')
@@ -259,6 +260,8 @@ app.use('/api/gravePlotBusiness-query', rbac.requirePowerByMenuName('gravePlotBu
 app.use('/api/gravePlotBusiness-save',gravePlotBusinessSaveROutes);
 app.use('/api/gravePlotBusiness-delete',gravePlotBusinessDeleteROutes);
 app.use('/api/gravePlotBusiness-query',gravePlotBusinessQueryROutes);
+app.use('/api/gravePlotBusiness-cancelSale', rbac.requirePowerByMenuName('gravePlotBusiness'));
+app.use('/api/gravePlotBusiness-cancelSale',gravePlotBusinessCancelSaleROutes);
 //销售统计查询接口(菜单 105101/105102/105103/105104 查询统计) 20260919 改按菜单 name 动态解析,
 app.use('/api/saleQuery', rbac.requirePowerByMenuName('saleQuery'));
 app.use('/api/buriedQuery', rbac.requirePowerByMenuName('buriedQuery'));
