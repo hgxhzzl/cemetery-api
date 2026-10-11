@@ -40,9 +40,15 @@ function requirePower(menuId) {
 
 // RBAC 按菜单 name 动态解析当前 idMenu 后校验:菜单 id 会因显示顺序调整而变化,代码不能写死 id;
 // 每次请求查 menu 表拿 id(菜单表极小,开销可忽略),name 缺失视为配置错误拒绝访问 20260919 动态化,
-function requirePowerByMenuName(menuName) {
+// openPaths(可选):挂载前缀下的子路径白名单,命中则仅需登录不校验菜单权限。适用于区域/园区下拉这类
+// 被多个业务页/查询页共用的参照数据:它们不能要求调用者具备“园区设置”菜单,否则未开该菜单的操作员会 403 使下拉空白 20261010 新增,
+function requirePowerByMenuName(menuName, openPaths) {
   return async function (req, res, next) {
     if (isPlatformAdmin(req)) {
+      return next();
+    }
+    // 注:中间件挂在 app.use('/api/park-query', ...) 下时 req.path 为去除前缀后的剩余路径(如 /region) 20261010 新增,
+    if (Array.isArray(openPaths) && openPaths.includes(req.path)) {
       return next();
     }
     try {
@@ -136,6 +142,115 @@ function requireQueryPowerWithDetail(menuName) {
   };
 }
 
+// 操作员区域名单短 TTL 缓存:30 秒内同一操作员不重复查库;管理员改完某操作员区域后
+// 最多 30 秒自然生效,不需重启服务 20261010 新增,
+const REGION_SCOPE_TTL_MS = 30 * 1000;
+const regionScopeCache = new Map();
+
+// 当前登录操作员的所属区域(operator.region,逗号分隔如"福东,福西"):菜单层区域二级菜单收窄与数据层区域下拉
+// 共用同一口径,故从 menu.js 抽出到授权层统一收口 20261010 新增,
+// 返回空数组代表"不做区域过滤",以下三种情况均回退到原有 account_power/operator_power 菜单权限口径:
+// 1) region 未配置; 2) 查询失败; 3) 平台管理员(跨区域运维角色,负责园区设置/票据配置/给操作员分配区域,
+// 若按其 region 收窄会出现"管理员填了区域就管不了其它区域"的自锁) 20261010 新增,
+async function fetchOperatorRegions(req) {
+  const idOperator = req && req.data && req.data.userId;
+  if (!idOperator) {
+    return [];
+  }
+  if (isPlatformAdmin(req)) {
+    return [];
+  }
+  // 同一次页面加载会先后命中菜单/区域下拉/列表接口多次,按 userId 做短 TTL 缓存避免反复 PK 查询;
+  // 空名单同样缓存(未配置区域/管理员),避免未配区域的账号每次请求都打库 20261010 新增,
+  const cacheKey = String(idOperator);
+  const cached = regionScopeCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < REGION_SCOPE_TTL_MS) {
+    return cached.regions;
+  }
+  const regions = await readOperatorRegions(idOperator);
+  regionScopeCache.set(cacheKey, { at: Date.now(), regions });
+  return regions;
+}
+
+async function readOperatorRegions(idOperator) {
+  try {
+    const rows = await pool.query('SELECT region FROM gm_data_000.operator WHERE idOperator = ?', [idOperator]);
+    if (!Array.isArray(rows) || rows.length === 0 || !rows[0].region) {
+      return [];
+    }
+    return String(rows[0].region)
+      // 分隔符同时接受半角/全角逗号:前端提交用半角,但存量数据和人工维护的库可能写成全角“，”。
+      // 一旦漏切会把“福东，福西”当成一个区域名,匹配不到任何标签,进而把该组功能整体隐藏掉 20261010 加固,
+      .split(/[,，]/)
+      .map((item) => item.trim())
+      .filter((item) => item !== '');
+  } catch (error) {
+    console.log('fetchOperatorRegions failed:', idOperator, error.message);
+    return [];
+  }
+}
+
+// 区域作用域中间件:挂在鉴权之后、业务路由之前。两件职责 20261010 新增,
+// 1) 显式携带 region 的请求(GET query / POST body 均计)不在当前操作员区域名单内 → 403,
+//    杜绝“前端选不到但直接改参调用”越权取/写其它区域数据;
+// 2) 将解析好的名单挂到 req.operatorRegions,供列表接口在“未指定区域”时强制收窄,避免省略参数即拿到全量,
+// 无名单(未配置区域/平台管理员)时不注入也不拦截,维持原有权限口径 20261010 新增,
+async function requireRegionScope(req, res, next) {
+  if (!req.data) {
+    return next();
+  }
+  try {
+    const allowed = await fetchOperatorRegions(req);
+    req.operatorRegions = allowed;
+    if (allowed.length === 0) {
+      return next();
+    }
+    const raw = String((req.query && req.query.region) || (req.body && req.body.region) || '').trim();
+    if (raw) {
+      // 多值形式也得过审:操作员保存时 region 是“福东,福西”这样的分配列表而非单一筛选值,
+      // 按单值比对会把正常的多区域分配误判成越权,故逐项校验且任一项不在名单即拦下 20261010 加固,
+      const asked = raw.split(/[,，]/).map((item) => item.trim()).filter((item) => item !== '');
+      const crossed = asked.filter((item) => !allowed.includes(item));
+      if (crossed.length > 0) {
+        console.log('region scope denied:', req.data.userId, req.method, req.originalUrl, 'crossed=' + crossed.join('|'));
+        return res.status(403).json({ error: '无权限:当前账号不属于该区域!' });
+      }
+    }
+    return next();
+  } catch (error) {
+    return public.handleQueryError(res, error);
+  }
+}
+
+// 列表接口区域条件构造器:统一三段口径 20261010 新增,
+// 1) 请求指定了 region → 等值匹配(越权值已由 requireRegionScope 在入口拦下);
+// 2) 未指定但操作员有区域名单 → 按名单 IN 收窄,防止省略参数拿到全库;
+// 3) 无名单(未配置/管理员)且未指定 → 返回 null 不加条件,完全维持旧行为,
+// 调用方拿到 null 时应退回原来的“不加过滤”分支,不得直接拼接 undefined 20261010 新增,
+function buildRegionCondition(req, column) {
+  const region = String((req.query && req.query.region) || '').trim();
+  if (region) {
+    return { sql: `${column} = ?`, params: [region] };
+  }
+  const allowed = (req && Array.isArray(req.operatorRegions)) ? req.operatorRegions : [];
+  if (allowed.length > 0) {
+    return { sql: `${column} IN (${allowed.map(() => '?').join(', ')})`, params: [...allowed] };
+  }
+  return null;
+}
+
+// 按操作员所属区域收窄名单:rows 中 fieldName 命中 allowedRegions 的才保留;
+// allowedRegions 为空维持全量(即未配置区域/管理员的回退口径),调用方无需再各自判空 20261010 新增,
+function filterByOperatorRegions(rows, fieldName, allowedRegions) {
+  if (!Array.isArray(rows)) {
+    return rows;
+  }
+  if (!Array.isArray(allowedRegions) || allowedRegions.length === 0) {
+    return rows;
+  }
+  return rows.filter((row) => allowedRegions.includes(String(row[fieldName])));
+}
+
 module.exports = {
   isPlatformAdmin,
   requirePlatformAdmin,
@@ -143,5 +258,9 @@ module.exports = {
   requirePowerByMenuName,
   requirePowerByAnyMenuName,
   requireQueryPowerWithDetail,
+  fetchOperatorRegions,
+  filterByOperatorRegions,
+  requireRegionScope,
+  buildRegionCondition,
 };
 

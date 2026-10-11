@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../database');
 const public = require('../public');
+const rbac = require('../rbac');
 module.exports = router;
 
 // 管理期限查询：room 表 endDate 落在时间段内的墓位，支持区域/园区/结束日期时间段过滤与服务端分页 20260915 新增
@@ -14,10 +15,12 @@ router.get('/list', async (req, res) => {
     ];
     const params = [];
 
-    const region = String(req.query.region || '').trim();
-    if (region) {
-        conditions.push('r.region = ?');
-        params.push(region);
+    // 区域条件由 rbac 统一构造:指定区域走等值;未指定但操作员有区域名单时按名单 IN 收窄,
+    // 堵住"省略 region 参数即取到全部区域数据"的越权口子 20261010 硬隔离,
+    const regionCond = rbac.buildRegionCondition(req, 'r.region');
+    if (regionCond) {
+        conditions.push(regionCond.sql);
+        params.push(...regionCond.params);
     }
 
     const park = String(req.query.park || '').trim();

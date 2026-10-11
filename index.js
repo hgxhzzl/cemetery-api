@@ -45,6 +45,10 @@ const parkSaveROutes = require('./park/save')
 const receiptConfigQueryROutes  = require('./receiptConfig/query')
 const receiptConfigSaveROutes = require('./receiptConfig/save')
 
+//卡片配色路径
+const cardColorQueryROutes  = require('./cardColor/query')
+const cardColorSaveROutes = require('./cardColor/save')
+
 //room路径
 const roomQueryROutes  = require('./room/query')
 const roomSaveROutes = require('./room/save')
@@ -184,7 +188,11 @@ app.use(async function (req, res, next) {
   console.error('Unhandled middleware error:', err);
   return next(err);
   });
-  
+
+// 区域作用域守卫:紧接鉴权之后、各业务路由之前,越权 region 直接 403 并将名单挂到 req.operatorRegions;
+// 登录/设备/菜单等无 req.data 或无区域参数的路径不受影响(无名单即不注入不拦截) 20261010 新增,
+app.use(rbac.requireRegionScope);
+
 app.use('/api/login',userRoutes);
 //设备白名单接口(登记/列表/停用,仅平台管理员可操作,路由层已有token认证) 20260924 新增,
 app.use('/api/device',device.router);
@@ -203,8 +211,10 @@ app.use('/api/account-save',accountSaveROutes);
 app.use('/api/account-query',accountQueryROutes);
 app.use('/api/account-delete',accountDeleteROutes);
 //标签接口(菜单 102102 选择设置) 20260917 RBAC 接入,20260919 改按菜单 name 动态解析,
+// 同理 /taginfo 作为业务页参考数据(墓位业务页的“逝者关系”下拉)不要求“选择设置”菜单权限,
+// 否则未开该菜单的操作员表单里这个下拉会空;/tagset 仍属选择设置页自身功能,保持严格校验 20261010 修复,
 app.use('/api/taginfo-save/insert', rbac.requirePowerByMenuName('tagInfo'));
-app.use('/api/taginfo-query', rbac.requirePowerByMenuName('tagInfo'));
+app.use('/api/taginfo-query', rbac.requirePowerByMenuName('tagInfo', ['/taginfo']));
 app.use('/api/taginfo-query',taginfoQueryROutes);
 app.use('/api/taginfo-save',taginfoSaveROutes);
 
@@ -224,8 +234,10 @@ app.use('/api/operatorPower-query', rbac.requirePowerByMenuName('operator'));
 app.use('/api/operatorPower-save',operatorPowerSaveROutes);
 app.use('/api/operatorPower-query',operatorPowerQueryROutes);
 //园区接口(菜单 102103 园区设置) 20260919 改按菜单 name 动态解析,
+// 区域/园区下拉(/region /park)为各业务页与查询页共用的参照数据且已按 operator.region 收窄,
+// 不要求调用者具备“园区设置”菜单权限:13766891955 这类未开该菜单的操作员会 403,表现为区域下拉空白 20261010 修复,
 app.use('/api/park-save/insert', rbac.requirePowerByMenuName('park'));
-app.use('/api/park-query', rbac.requirePowerByMenuName('park'));
+app.use('/api/park-query', rbac.requirePowerByMenuName('park', ['/region', '/park']));
 app.use('/api/park-save',parkSaveROutes);
 app.use('/api/park-query',parkQueryROutes);
 //收据配制接口(菜单 102105 收据配制) 20260922 新增,
@@ -235,6 +247,13 @@ app.use('/api/receiptConfig-query',receiptConfigQueryROutes);
 //收据配制打印查询:打印票据读取前缀/地址/电话不属页面操作,仅需登录不校验菜单权限 20260922 新增,
 app.use('/api/receiptConfig-print',receiptConfigQueryROutes);
 app.use('/api/receiptConfig-save',receiptConfigSaveROutes);
+//卡片配色接口(菜单 name=cardColor 卡片颜色) 20261011 新增,
+// 查询不校验菜单权限:四态卡片色出现在墓位业务/墓位设置/管理费用/迁出等所有卡片页,未开"卡片颜色"菜单的操作员
+// 也应看到同事配好的色,权限只挡在保存上(与 /api/receiptConfig-print 只需登录同理);
+// 未建表时查询报错由前端 catch 回落 CSS 默认色,不影响进页 20261011 新增,
+app.use('/api/cardColor-query', cardColorQueryROutes);
+app.use('/api/cardColor-save', rbac.requirePowerByMenuName('cardColor'));
+app.use('/api/cardColor-save',cardColorSaveROutes);
 //room接口(菜单 name=room 墓位设置,按 name 动态解析 id,菜单 id 因排序调整变化时不需改代码 20260919 修复)
 app.use('/api/room-save/insert', rbac.requirePowerByMenuName('room'));
 app.use('/api/room-save/update', rbac.requirePowerByMenuName('room'));

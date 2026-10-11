@@ -88,12 +88,14 @@ router.post('/insert', async (req, res) => {
   // 销售形态:落 sale 表,同步 room 置已销售+buyer/serialNo,付款人非空时同步新增 contacts 联系人,
   // 并向 buried 新增一条下葬记录(安葬者三字段+购墓人映射,同事务,不联动下葬状态机) 20260923 修改,
   if (type === 'sale') {
-    // 安葬者三字段属 buried 表,先捕获供 buried 插入,避免混入 sale 插入字段 20260923 新增,
+    // 安葬者三字段属 buried 表,先捕获供 buried 插入,避免混入 sale 插入字段 20260923 新增;死亡日期同为 buried 列一并捕获 20261011 新增,
     const deceased = req.body.deceased;
+    const deathDate = req.body.deathDate;
     const burialDate = req.body.burialDate;
     const deceasedIDCard = req.body.deceasedIDCard;
     const deceasedRelation = req.body.deceasedRelation;
     delete req.body.deceased;
+    delete req.body.deathDate;
     delete req.body.burialDate;
     delete req.body.deceasedIDCard;
     delete req.body.deceasedRelation;
@@ -122,12 +124,16 @@ router.post('/insert', async (req, res) => {
     sqlList.push(sql);
     // 捕获 sale 新插入记录的 idSale(同连接),供 buried 插入引用 20260923 新增,
     sqlList.push('SET @idSale = LAST_INSERT_ID()');
-    // buried 记录为手写 INSERT,不走 getInsertStatement 自动补全,显式补 createDate/modifyDate 20261004 新增,
+    // buried 记录为手写 INSERT,不走 getInsertStatement 自动补全,显式补 createDate/modifyDate 20261004 新增;
+    // 列清单同步补 deathDate(写死列名的 INSERT 不包名称即静默丢字段) 20261011 新增,
     const buriedDate = public.getCurrentDateTime();
     sqlList.push({
-      sql: `INSERT INTO ${req.data.dataBase}.buried (idRoom, idSale, deceased, burialDate, deceasedIDCard, deceasedRelation, contacts, contactsphone, contactsIDCard, operator, createDate, modifyDate)
-        VALUES (?, @idSale, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      params: [idRoom, deceased, burialDate, deceasedIDCard, deceasedRelation,
+      sql: `INSERT INTO ${req.data.dataBase}.buried (idRoom, idSale, deceased, deathDate, burialDate, deceasedIDCard, deceasedRelation, contacts, contactsphone, contactsIDCard, operator, createDate, modifyDate)
+        VALUES (?, @idSale, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      // deathDate 可空:前端未选时 normalizeBodyDates 已将空串转 null,键缺失时兼容为 null(不可直传 undefined,mysql2 绑定 undefined 会报错) 20261011 新增,
+      params: [idRoom, deceased,
+        deathDate === undefined || deathDate === null ? null : deathDate,
+        burialDate, deceasedIDCard, deceasedRelation,
         payer === undefined || payer === null ? '' : payer,
         payerPhone === undefined || payerPhone === null ? '' : payerPhone,
         payerIDCard === undefined || payerIDCard === null ? '' : payerIDCard,
@@ -171,7 +177,8 @@ router.post('/insert', async (req, res) => {
     return public.Transaction(sqlList, res);
   }
 
-  // 预定形态:落 reserve 表(联系人/电话映射 liaison/liaisonPhone),同步 room 置预定/已预定(同预定登记) 20260923 修改,
+  // 预定形态:落 reserve 表(联系人/电话映射 liaison/liaisonPhone),同步 room 只置已预定(销售状态不动,同预定登记);
+  // 同样一穴一条,该墓位已有预定记录则复用原行 20260923 修改, 20261011 改为一穴一条,
   if (type === 'reserve') {
     req.body.liaison = req.body.payer;
     req.body.liaisonPhone = req.body.payerPhone;
@@ -191,16 +198,27 @@ router.post('/insert', async (req, res) => {
     req.body.table = req.data.dataBase + '.reserve';
     req.body.operator = req.data.userName;
 
-    const sqlList = [public.getInsertStatement(req.body)];
+    // 一穴一条:复用该墓位已有预定记录(含已取消的历史行),不另新增第二条;与预定登记页共用同一辅助函数 20261011 修改,
+    let reserveWrite;
+    try {
+      reserveWrite = await public.buildReserveUpsertStatements(req.data.dataBase, idRoom, req.body);
+    } catch (error) {
+      return public.handleQueryError(res, error);
+    }
+
+    const sqlList = [...reserveWrite.statements];
     const json = {
       table: req.data.dataBase + '.room',
       operator: req.data.userName,
       idfield: 'idRoom',
       idvalue: idRoom,
-      saleStatus: 'statusType.saleStatusEnum.reserve',
+      // 与预定登记同口径:只置预定状态,不得改写 saleStatus 20261011 修正,
       reserveStatus: 'statusType.reserveStatusEnum.reserved',
     };
     sqlList.push(public.getUpdateByIdStatement(json));
+    // 墓位限期副本同步(同预定登记):本形态表单目前未开预定限期控件,本次写入的预定记录该列为空,
+    // 同步后墓位副本与预定记录一致;日后本页补上控件则无需再改后端 20261011 新增,
+    sqlList.push(public.getRoomReservationExpireSyncSql(req.data.dataBase, idRoom));
 
     return public.Transaction(sqlList, res);
   }
@@ -334,12 +352,14 @@ router.post('/update', async (req, res) => {
       return res.status(400).json({ error: 'idBusiness参数错误!' });
     }
 
-    // 安葬者三字段属 buried 表,先捕获供 buried 同步,避免混入 sale 更新字段 20260923 新增,
+    // 安葬者三字段属 buried 表,先捕获供 buried 同步,避免混入 sale 更新字段 20260923 新增;死亡日期同为 buried 列一并捕获 20261011 新增,
     const deceased = req.body.deceased;
+    const deathDate = req.body.deathDate;
     const burialDate = req.body.burialDate;
     const deceasedIDCard = req.body.deceasedIDCard;
     const deceasedRelation = req.body.deceasedRelation;
     delete req.body.deceased;
+    delete req.body.deathDate;
     delete req.body.burialDate;
     delete req.body.deceasedIDCard;
     delete req.body.deceasedRelation;
@@ -410,7 +430,11 @@ router.post('/update', async (req, res) => {
         );
         const buriedJson = {
           deceased: deceased === undefined || deceased === null ? '' : deceased,
-          burialDate: burialDate === undefined || burialDate === null ? '' : burialDate,
+          // 死亡日期可空:置 null 而非 ''(与其他字段不同——datetime 写空串在严格模式下会被 MySQL 拒),未填即抹空该列 20261011 新增,
+          deathDate: deathDate === undefined || deathDate === null ? null : deathDate,
+          // 下葬日期置 null 而非 ''(与死亡日期同口径):库列 datetime 在 sql_mode=STRICT_TRANS_TABLES 下写空串会直接报错,
+          // 销售形态下葬日期本身非必填,留空提交应当落 NULL 而不是抛 500 20261011 修复,
+          burialDate: burialDate === undefined || burialDate === null ? null : burialDate,
           deceasedIDCard: deceasedIDCard === undefined || deceasedIDCard === null ? '' : deceasedIDCard,
           deceasedRelation: deceasedRelation === undefined || deceasedRelation === null ? '' : deceasedRelation,
           contacts: payer === undefined || payer === null ? '' : payer,
@@ -418,7 +442,12 @@ router.post('/update', async (req, res) => {
           contactsIDCard: payerIDCard === undefined || payerIDCard === null ? '' : payerIDCard,
           operator: req.data.userName,
         };
-        const hasBuriedInfo = String(buriedJson.deceased).trim() !== '' || String(buriedJson.burialDate).trim() !== '' || String(buriedJson.deceasedIDCard).trim() !== '';
+        // 判定“本次填写了安葬信息”改为逐项判非空且非 null:burialDate 空值已由 '' 调为 null,
+        // 而 String(null).trim() 得到 'null' 属非空串,沿用旧写法会使本判定恒为真、在无活动记录时误补插 20261011 修复,
+        const hasBuriedValue = (value) => value !== undefined && value !== null && String(value).trim() !== '';
+        const hasBuriedInfo = hasBuriedValue(buriedJson.deceased)
+          || hasBuriedValue(buriedJson.burialDate)
+          || hasBuriedValue(buriedJson.deceasedIDCard);
         if (existing && existing.length > 0) {
           buriedJson.table = buriedTable;
           buriedJson.idfield = 'idBuried';
@@ -440,7 +469,7 @@ router.post('/update', async (req, res) => {
     }
   }
 
-  // 预定形态:仅更新 reserve 记录的联系人/电话/备注,墓位状态不变(同预定修改) 20260923 修改,
+  // 预定形态:更新 reserve 记录的联系人/电话/备注,并将预定限期同步到墓位副本,墓位状态不变(同预定修改) 20260923 修改,
   if (type === 'reserve') {
     const idReserve = public.parseNumericParam(req.body.idBusiness);
     if (idReserve === null) {
@@ -463,7 +492,7 @@ router.post('/update', async (req, res) => {
     delete req.body.contacts;
     delete req.body.contactsphone;
     delete req.body.contactsIDCard;
-    // 墓位不变,无需更新外键 idRoom
+    // 墓位不变,无需更新外键 idRoom:限期副本同步由 idReserve 反查所属墓位,不依赖该参数 20261011 修改,
     delete req.body.idRoom;
 
     req.body.table = req.data.dataBase + '.reserve';
@@ -473,12 +502,11 @@ router.post('/update', async (req, res) => {
     delete req.body.idBusiness;
 
     const statement = public.getUpdateByIdStatement(req.body);
-    try {
-      const results = await pool.query(statement.sql, statement.params);
-      return public.respondAffectedRows(res, results);
-    } catch (error) {
-      return public.handleQueryError(res, error);
-    }
+    // 墓位限期副本与预定记录同一事务(按 idReserve 反查墓位,写法同预定修改) 20261011 新增,
+    return public.Transaction(
+      [statement, public.getRoomReservationExpireSyncByIdReserveSql(req.data.dataBase, idReserve)],
+      res,
+    );
   }
 
   // 下葬形态:按 idBuried 更新下葬记录,锚定管理费日期、保持已下葬、deceased 聚合、联系人同步(同下葬页修改) 20260923 新增,

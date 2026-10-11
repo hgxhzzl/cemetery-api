@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../database');
 const public = require('../public');
+const rbac = require('../rbac');
 module.exports = router;
 
 
@@ -35,15 +36,18 @@ function buildParkTree(results) {
 router.get('/parkTree', async (req, res) => {
     const db = req.data.dataBase;
     const table = " SELECT region,park FROM " + db + ".v_region_park";
+    // 区域→园区树同样按操作员区域名单收窄,与 /park-query/region、/park-query/park 同源口径,
+    // 避开“下拉挡住了但树接口能拿到全区划”的不一致;未配区域/平台管理员返回全量 20261010 硬隔离,
+    const allowedRegions = await rbac.fetchOperatorRegions(req);
     try {
         const results = await pool.query(table);
-        return public.respondList(res, buildParkTree(results));
+        return public.respondList(res, buildParkTree(rbac.filterByOperatorRegions(results, 'region', allowedRegions)));
     } catch (error) {
         // 视图缺失兑底:直接查 room 表去重,保证存量库无视图时仍可用 20260915 新增,
         try {
             const fallbackSql = "SELECT DISTINCT park AS park, region AS region FROM " + db + ".room ORDER BY region";
             const fallbackResults = await pool.query(fallbackSql);
-            return public.respondList(res, buildParkTree(fallbackResults));
+            return public.respondList(res, buildParkTree(rbac.filterByOperatorRegions(fallbackResults, 'region', allowedRegions)));
         } catch (fallbackError) {
             return public.handleQueryError(res, fallbackError);
         }

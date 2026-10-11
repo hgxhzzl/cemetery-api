@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../database');
 const public = require('../public');
+const rbac = require('../rbac');
 module.exports = router;
 
 // 墓位迁出记录列表：transfer_out 关联 room 逐条返回迁出记录，支持区域/园区/迁出时间段过滤与服务端分页 20260916 新增
@@ -9,10 +10,12 @@ router.get('/list', async (req, res) => {
     const conditions = ['t.isDeleted = 0'];
     const params = [];
 
-    const region = String(req.query.region || '').trim();
-    if (region) {
-        conditions.push('r.region = ?');
-        params.push(region);
+    // 区域条件由 rbac 统一构造:指定区域走等值;未指定但操作员有区域名单时按名单 IN 收窄,
+    // 堵住"省略 region 参数即取到全部区域数据"的越权口子 20261010 硬隔离,
+    const regionCond = rbac.buildRegionCondition(req, 'r.region');
+    if (regionCond) {
+        conditions.push(regionCond.sql);
+        params.push(...regionCond.params);
     }
 
     const park = String(req.query.park || '').trim();
@@ -63,19 +66,19 @@ router.get('/list', async (req, res) => {
 
 // 墓位列表：返回该区域(园区可选)全部活动墓位，供卡片按迁出状态判定 新建/修改/删除 20260916 修改,
 // 区域三级菜单进入时仅传区域不传园区，园区参数可选，为空时查该区域全部墓位；
-// 区域为空(如查询统计下 105105 墓位迁出查询入口无 meta.region)时查全部区域墓位，兼容全区域查询视图
+// 区域为空时:有区域名单的操作员按名单收窄,无名单(未配置/管理员)才查全部区域 20261010 硬隔离,
 router.get('/room', async (req, res) => {
   const park = String(req.query.park || '').trim();
-  const region = String(req.query.region || '').trim();
   const table = req.data.dataBase + '.room';
 
   const conditions = ['isDeleted = 0'];
   const params = [];
-  if (region) {
-    conditions.push('region = ?');
-    params.push(region);
+  const regionCond = rbac.buildRegionCondition(req, 'region');
+  if (regionCond) {
+    conditions.push(regionCond.sql);
+    params.push(...regionCond.params);
   }
-  // 园区参数可选,为空时查该区域全部墓位;区域为空时查全部区域墓位,兼容全区域查询视图 20260917 参数化,
+  // 园区参数可选,为空时查所选区域全部墓位;区域条件已按操作员名单收窄 20260917 参数化 20261010 硬隔离,
   if (park) {
     conditions.push('park = ?');
     params.push(park);

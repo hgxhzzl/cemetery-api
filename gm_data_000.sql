@@ -83,6 +83,7 @@ INSERT INTO `account_power` VALUES ('102102', 1, 0, 0, 0, 0, 0, 0, 'menu.tagInfo
 INSERT INTO `account_power` VALUES ('102103', 1, 0, 0, 0, 0, 0, 0, 'menu.park', 'gm_data_000', 2, '', 'menu.parkDescribe');
 INSERT INTO `account_power` VALUES ('102104', 1, 1, 1, 1, 0, 0, 1, 'menu.operator', 'gm_data_000', 2, '', 'menu.operatorDescribe');
 INSERT INTO `account_power` VALUES ('102105', 1, 0, 0, 0, 0, 0, 0, 'menu.receiptConfig', 'gm_data_000', 2, '', 'menu.receiptConfigDescribe');
+INSERT INTO `account_power` VALUES ('102106', 1, 0, 0, 0, 0, 0, 0, 'menu.cardColor', 'gm_data_000', 2, '', 'menu.cardColorDescribe');
 INSERT INTO `account_power` VALUES ('103100', 1, 0, 0, 0, 0, 0, 0, 'menu.operate', 'gm_data_000', 1, '', 'menu.operateDescribe');
 INSERT INTO `account_power` VALUES ('103101', 1, 1, 1, 1, 0, 0, 0, 'menu.gravePlotBusiness', 'gm_data_000', 2, '', 'menu.gravePlotBusinessDescribe');
 INSERT INTO `account_power` VALUES ('103107', 1, 1, 1, 0, 0, 0, 0, 'menu.room', 'gm_data_000', 2, '', 'menu.roomDescribe');
@@ -160,6 +161,7 @@ INSERT INTO `menu` VALUES ('102102', 'taginfo', 'tagInfo', '/taginfo/index', '',
 INSERT INTO `menu` VALUES ('102103', 'park', 'park', '/park/index', '', NULL, '102100', '园区设置', 'Park Settings');
 INSERT INTO `menu` VALUES ('102104', 'operator', 'operator', '/operator/index', '', NULL, '102100', '操作人员', 'Operator');
 INSERT INTO `menu` VALUES ('102105', 'receiptConfig', 'receiptConfig', '/receiptConfig/index', '', NULL, '102100', '收据配制', 'receipt Config');
+INSERT INTO `menu` VALUES ('102106', 'cardColor', 'cardColor', '/cardColor/index', '', NULL, '102100', '卡片颜色', 'Card Colors');
 INSERT INTO `menu` VALUES ('103100', '/operate', 'operate', 'LAYOUT', '/operate/base', 'assignment', '0', '墓区业务', 'Cemetery Business');
 INSERT INTO `menu` VALUES ('103101', 'gravePlotBusiness', 'gravePlotBusiness', '/gravePlotBusiness/index', '', NULL, '103100', '墓位业务', 'Grave Plot Business');
 INSERT INTO `menu` VALUES ('103107', 'room', 'room', '/room/index', '', NULL, '103100', '墓位设置', 'Cemetery Area Settings');
@@ -190,7 +192,7 @@ CREATE TABLE `operator` (
   `team` varchar(40) DEFAULT NULL COMMENT '团队',
   `useStatus` varchar(80) DEFAULT '' COMMENT '使用状态',
   `password` varchar(100) NOT NULL DEFAULT '' COMMENT '账户密码(bcrypt哈希60字符) 20260916加宽',
-  `remark` varchar(255) DEFAULT '' COMMENT '备注',
+  `region` varchar(255) DEFAULT '' COMMENT '区域',
   `operator` varchar(40) DEFAULT '' COMMENT '操作人名',
   `modifyDate` datetime DEFAULT NULL COMMENT '修改日期',
   `createDate` datetime DEFAULT NULL COMMENT '创建日期',
@@ -325,6 +327,7 @@ CREATE TABLE `room` (
   `contacts` varchar(200) DEFAULT NULL COMMENT '联系人',
   `transferOutStatus` varchar(100) DEFAULT NULL COMMENT '迁出状态',
   `remark` varchar(50) DEFAULT NULL COMMENT '备注',
+  `reservationExpireDate` datetime DEFAULT NULL COMMENT '预定限期',
   PRIMARY KEY (`idRoom`) USING BTREE
 ) ENGINE=InnoDB AUTO_INCREMENT=1000000 DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
 
@@ -384,6 +387,7 @@ CREATE TABLE `buried` (
   `deceasedIDCard` varchar(40) DEFAULT NULL COMMENT '安葬者身份证号',
   `deceasedRelation` varchar(20) DEFAULT NULL COMMENT '逝者关系',
   `burialDate` datetime DEFAULT NULL COMMENT '下葬日期',
+  `deathDate` datetime DEFAULT NULL COMMENT '死亡日期',
   `contacts` varchar(20) DEFAULT NULL COMMENT '联系人',
   `contactsphone` varchar(40) DEFAULT '' COMMENT '联系人电话',
   `contactsIDCard` varchar(40) DEFAULT NULL COMMENT '联系人身份证号',
@@ -473,6 +477,22 @@ CREATE TABLE `receipt_config` (
 ) ENGINE=InnoDB AUTO_INCREMENT=183 DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
 
 -- ----------------------------
+-- Table structure for card_color
+-- ----------------------------
+DROP TABLE IF EXISTS `card_color`;
+CREATE TABLE `card_color` (
+  `idConfig` bigint(20) NOT NULL AUTO_INCREMENT,
+  `configJson` varchar(1000) NOT NULL COMMENT '四态配色JSON:unsold/sold/buried/expired,每组 color/border/isEnabled',
+  PRIMARY KEY (`idConfig`) USING BTREE
+) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
+
+-- ----------------------------
+-- Records of card_color
+-- ----------------------------
+-- 整库一套(同库多区域共用),恒一条记录且只做更新;初值 = 抽变量前四态硬编码色,保证上线前后视觉一致 20261011 新增
+INSERT INTO `card_color` VALUES (1, '{"unsold":{"color":"#FCF6EF","border":"#FCA678","isEnabled":true},"sold":{"color":"#F4FEF9","border":"#00A870","isEnabled":true},"buried":{"color":"#F4F8FE","border":"#0052D9","isEnabled":true},"expired":{"color":"#FCE5E5","border":"#D54941","isEnabled":true}}');
+
+-- ----------------------------
 -- Table structure for reserve
 -- ----------------------------
 DROP TABLE IF EXISTS `reserve`;
@@ -486,6 +506,7 @@ CREATE TABLE `reserve` (
   `remark` varchar(50) DEFAULT NULL COMMENT '备注',
   `modifyDate` datetime NOT NULL COMMENT '修改日期',
   `createDate` datetime NOT NULL COMMENT '创建日期',
+  `reservationExpireDate` datetime DEFAULT NULL COMMENT '预定限期',
   PRIMARY KEY (`idReserve`) USING BTREE
 ) ENGINE=InnoDB AUTO_INCREMENT=7000000 DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
 
@@ -501,6 +522,7 @@ CREATE TABLE `transfer_out` (
   `reason` varchar(100) DEFAULT NULL COMMENT '原因',
   `contacts` varchar(20) DEFAULT NULL COMMENT '联系人',
   `contactsphone` varchar(40) DEFAULT '' COMMENT '联系人电话',
+  `contactsIDCard` varchar(40) DEFAULT NULL COMMENT '联系人身份证号',
   `isDeleted` smallint(1) unsigned zerofill DEFAULT '0' COMMENT '是否删除',
   `operator` varchar(40) DEFAULT '' COMMENT '操作人名',
   `modifyDate` datetime DEFAULT NULL COMMENT '修改日期',

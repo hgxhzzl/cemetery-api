@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../database');
 const public = require('../public');
+const rbac = require('../rbac');
 module.exports = router;
 
 // 墓区销售查询：sale 关联 room 逐条返回销售单，支持区域/园区/时间段过滤与服务端分页 20260911 修改,
@@ -9,10 +10,12 @@ router.get('/list', async (req, res) => {
     const conditions = ['s.isDeleted = 0'];
     const params = [];
 
-    const region = String(req.query.region || '').trim();
-    if (region) {
-        conditions.push('r.region = ?');
-        params.push(region);
+    // 区域条件由 rbac 统一构造:指定区域走等值;未指定但操作员有区域名单时按名单 IN 收窄,
+    // 堵住"省略 region 参数即取到全部区域数据"的越权口子 20261010 硬隔离,
+    const regionCond = rbac.buildRegionCondition(req, 'r.region');
+    if (regionCond) {
+        conditions.push(regionCond.sql);
+        params.push(...regionCond.params);
     }
 
     const park = String(req.query.park || '').trim();

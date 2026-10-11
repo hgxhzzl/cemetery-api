@@ -251,6 +251,65 @@ exports.getRoomDeceasedSyncSql = function (dataBase, idRoom) {
   );
 }
 
+//墓位预定限期副本同步的语句模板:取该墓位活动预定记录的预定限期,无活动预定时自动置空,
+//与 contacts/deceased 两个聚合同步同属"墓位冗余列由业务表反推"口径,预定登记/修改/取消三条路径均复用本模板避免各处手写产生偏差;
+//MAX 兜底防一穴多条活动预定(历史脏数据)时子查询返回多行报错;whereClause 里的值均已经过 parseNumericParam 校验 20261011 新增,
+function roomReservationExpireSyncSql(dataBase, whereClause) {
+  return (
+    'update ' + dataBase + '.room r set r.reservationExpireDate = (' +
+    'select max(res.reservationExpireDate) from ' + dataBase + '.reserve res' +
+    ' where res.idRoom = r.idRoom and res.isDeleted = 0' +
+    ') where ' + whereClause
+  );
+}
+
+//按墓位同步限期副本(预定登记/取消预定两个入口手里就是 idRoom) 20261011 新增,
+exports.getRoomReservationExpireSyncSql = function (dataBase, idRoom) {
+  return roomReservationExpireSyncSql(dataBase, 'r.idRoom = ' + idRoom);
+}
+
+//按预定记录反查所属墓位再同步限期副本(预定修改两个入口用):不依赖调用方是否传 idRoom——
+//漏传时旧写法会静默不同步,造成 reserve 已改期、room 副本还是旧到期日 20261011 新增,
+exports.getRoomReservationExpireSyncByIdReserveSql = function (dataBase, idReserve) {
+  return roomReservationExpireSyncSql(
+    dataBase,
+    'r.idRoom = (select res2.idRoom from ' + dataBase + '.reserve res2 where res2.idReserve = ' + idReserve + ')',
+  );
+}
+
+//预定记录一穴一条:同一墓位不累积多条预定信息——已有记录(含取消后的历史行)就复用原行按本次提交覆盖并把 isDeleted 回置 0,
+//一条都没有才新增;复用时顺带把同穴其余活动记录软删(历史遗留的一穴多条),保证"一穴只留一条"从本次写入起成立 20261011 新增,
+//入参 json 为已设好 table/operator 的预定记录字段(同 getInsertStatement 入参),idRoom 由调用方先过 parseNumericParam 校验,
+exports.buildReserveUpsertStatements = async function (dataBase, idRoom, json) {
+  // 优先复用活动记录(isDeleted = 0),无活动记录时取最近一条已取消记录(历史不堆积的关键),
+  // 本应用同一事务内先查后写且预定登记为单操作员场景,不再额外加行锁 20261011 新增,
+  const rows = await pool.query(
+    'select idReserve from ' + dataBase + '.reserve where idRoom = ? order by isDeleted asc, idReserve desc limit 1',
+    [idRoom],
+  );
+  if (!rows || rows.length === 0) {
+    return { reused: false, statements: [exports.getInsertStatement(json)] };
+  }
+
+  const idReserve = rows[0].idReserve;
+  const updateJson = { ...json, idfield: 'idReserve', idvalue: idReserve, isDeleted: 0 };
+  // idRoom 就是原行所属墓位、idReserve 为主键,两者不必再进 SET 子句 20261011 新增,
+  delete updateJson.idRoom;
+  delete updateJson.idReserve;
+
+  return {
+    reused: true,
+    idReserve,
+    statements: [
+      exports.getUpdateByIdStatement(updateJson),
+      {
+        sql: 'update ' + dataBase + '.reserve set isDeleted = 1 where idRoom = ? and idReserve <> ? and isDeleted = 0',
+        params: [idRoom, idReserve],
+      },
+    ],
+  };
+}
+
 //token失效统一提示文案,index/menu 共用,避免各处硬编码 20260917 梳理,
 exports.TOKEN_EXPIRED_MESSAGE = 'token失效1';
 

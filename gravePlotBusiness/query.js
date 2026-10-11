@@ -5,7 +5,7 @@ const public = require('../public');
 module.exports = router;
 
 // 按墓位查询当前活动业务记录,用于表单回填:代码独立但数据表复用原有表——
-// type=sale 查 sale 表并 LEFT JOIN buried(条件同 idSale)带出安葬者/下葬日期/安葬者身份证号/逝者关系,
+// type=sale 查 sale 表并 LEFT JOIN buried(条件同 idSale)带出安葬者/死亡日期/下葬日期/安葬者身份证号/逝者关系,
 //   有对应 buried 记录则带入,无则为空;主键 idSale 别名 idBusiness 供前端判定新建/修改;
 // type=reserve 查 reserve 表(liaison/liaisonPhone 映射为 payer/payerPhone),
 // type=certificate 查 burial_cert 表安葬证设置记录(倒序取最新一条),
@@ -19,7 +19,8 @@ router.get('/get-by-room', async (req, res) => {
 
   let sql;
   if (type === 'sale') {
-    sql = `SELECT s.*, b.deceased, b.burialDate, b.deceasedIDCard, b.deceasedRelation, s.idSale AS idBusiness
+    // 死亡日期(buried.deathDate)：销售形态联查带出供修改回填，无 buried 记录时为 null 20261011 新增,
+    sql = `SELECT s.*, b.deceased, b.deathDate, b.burialDate, b.deceasedIDCard, b.deceasedRelation, s.idSale AS idBusiness
       FROM ${req.data.dataBase}.sale s
       LEFT JOIN ${req.data.dataBase}.buried b ON b.idSale = s.idSale AND b.isDeleted = 0
       WHERE s.idRoom = ? AND s.isDeleted = 0`;

@@ -8,7 +8,7 @@ module.exports = router;
 router.get('/', async (req, res) => {
     let dataBaseName = req.data.dataBase;
     // 列清单不含 password,避免密码哈希随接口泄露 20260917 越权收口,
-    let sql = ' SELECT idOperator, name, phone, duties, team, useStatus, remark, operator, modifyDate, createDate, isDeleted, isAccount, dataBaseName, joinDate, isMaintenance FROM  gm_data_000.operator Where isDeleted = 0 and dataBaseName = ?';
+    let sql = ' SELECT idOperator, name, phone, duties, team, useStatus, region, operator, modifyDate, createDate, isDeleted, isAccount, dataBaseName, joinDate, isMaintenance FROM  gm_data_000.operator Where isDeleted = 0 and dataBaseName = ?';
     try {
         const results = await pool.query(sql, [dataBaseName]);
         return public.respondList(res, results);
@@ -24,7 +24,7 @@ router.get('/id', async (req, res) => {
     }
 
     // 列清单不含 password;非平台管理员仅可查本租户操作员 20260917 越权收口,
-    let sql = ' SELECT idOperator, name, phone, duties, team, useStatus, remark, operator, modifyDate, createDate, isDeleted, isAccount, dataBaseName, joinDate, isMaintenance FROM  gm_data_000.operator Where isDeleted = 0 and idOperator = ?';
+    let sql = ' SELECT idOperator, name, phone, duties, team, useStatus, region, operator, modifyDate, createDate, isDeleted, isAccount, dataBaseName, joinDate, isMaintenance FROM  gm_data_000.operator Where isDeleted = 0 and idOperator = ?';
     if (!rbac.isPlatformAdmin(req)) {
         sql += ' and dataBaseName = ?';
     }
