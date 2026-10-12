@@ -82,3 +82,21 @@ router.get('/room-list', async (req, res) => {
     return public.handleQueryError(res, error);
   }
 });
+
+// 新建销售取号:按区域(region)取区内最大编号+1,定宽6位前导零补齐(如 005167→005168),前端预填可手改 20261012 新增,
+// 编号空间为整个区域(同区各园区共用一条递增序列);不过滤 isDeleted——软删墓位编号同样计入基数,编号一经发出永不复用,
+// CAST(... AS UNSIGNED) 兼容前导零并跳过历史脏值(非数字当0),空区回 000001 20261012 新增,
+router.get('/nextSerialNo', async (req, res) => {
+  const region = req.query.region;
+  if (region === undefined || region === null || String(region).trim() === '') {
+    return res.status(400).json({ error: 'region参数错误!' });
+  }
+  const sql = `SELECT LPAD(IFNULL(MAX(CAST(serialNo AS UNSIGNED)), 0) + 1, 6, '0') AS nextNo
+    FROM ${req.data.dataBase}.room WHERE region = ?`;
+  try {
+    const results = await pool.query(sql, [region]);
+    return public.respondList(res, results);
+  } catch (error) {
+    return public.handleQueryError(res, error);
+  }
+});

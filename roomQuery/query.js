@@ -42,21 +42,37 @@ router.get('/list', async (req, res) => {
         params.push(`%${keyword}%`);
     }
 
-    // 销售状态/迁出状态多选过滤：一对复选框只勾其一时按该状态过滤，都勾或都不勾时不过滤 20260924 新增
-    // 迁出状态保留 out/notOut 两个参数但列表页已不再传 notOut(未迁出就是不限)，两个都收着才能保持接口口径不变 20261011 说明,
-    const sold = String(req.query.sold || '') === 'true';
-    const unsold = String(req.query.unsold || '') === 'true';
-    if (sold !== unsold) {
-        conditions.push(sold ? 's.idRoom IS NOT NULL' : 's.idRoom IS NULL');
+    // 状态多选过滤：8 个复选框(已/未销售、已/未预定、已/未下葬、已/未迁出)每个单独按 room 对应状态列成一组,
+    // 勾选的所有组取并集(union all 去重：命中任一选中状态即纳入，全部不勾则状态维度不限) 20260924 新增 20261012 改为并集,
+    // 已/未销售改判 room.saleStatus(不再用 sale 联表)，未销售=非已销售(含空值与历史 reserve 脏值) 20261012 新增,
+    const statusConds = [];
+    if (String(req.query.sold || '') === 'true') {
+        statusConds.push("r.saleStatus = 'statusType.saleStatusEnum.sold'");
     }
-    const out = String(req.query.out || '') === 'true';
-    const notOut = String(req.query.notOut || '') === 'true';
-    if (out !== notOut) {
-        conditions.push(
-            out
-                ? "r.transferOutStatus = 'statusType.transferOutStatusEnum.out'"
-                : "(r.transferOutStatus IS NULL OR r.transferOutStatus <> 'statusType.transferOutStatusEnum.out')",
-        );
+    if (String(req.query.unsold || '') === 'true') {
+        statusConds.push("(r.saleStatus IS NULL OR r.saleStatus <> 'statusType.saleStatusEnum.sold')");
+    }
+    if (String(req.query.reserved || '') === 'true') {
+        statusConds.push("r.reserveStatus = 'statusType.reserveStatusEnum.reserved'");
+    }
+    if (String(req.query.unreserved || '') === 'true') {
+        statusConds.push("(r.reserveStatus IS NULL OR r.reserveStatus <> 'statusType.reserveStatusEnum.reserved')");
+    }
+    if (String(req.query.buried || '') === 'true') {
+        statusConds.push("r.intoStatus = 'statusType.intoStatusEnum.buried'");
+    }
+    if (String(req.query.notBuried || '') === 'true') {
+        statusConds.push("(r.intoStatus IS NULL OR r.intoStatus <> 'statusType.intoStatusEnum.buried')");
+    }
+    if (String(req.query.out || '') === 'true') {
+        statusConds.push("r.transferOutStatus = 'statusType.transferOutStatusEnum.out'");
+    }
+    if (String(req.query.notOut || '') === 'true') {
+        statusConds.push("(r.transferOutStatus IS NULL OR r.transferOutStatus <> 'statusType.transferOutStatusEnum.out')");
+    }
+    // 多组间 OR(并集)，整体作为一个条件与区域/园区/日期/关键词等其他条件 AND 拼接 20261012 新增,
+    if (statusConds.length > 0) {
+        conditions.push(`(${statusConds.join(' OR ')})`);
     }
 
 

@@ -75,6 +75,24 @@ function stripBuriedBody(req) {
   delete req.body.serialNo;
 }
 
+// 销售编号区内唯一校验:查同 region 是否已有其它墓位(含软删——编号一经发出永不复用)占用该编号,返回占用者 idRoom,无则 null 20261012 新增,
+// 编号空间为整个区域(region),与取号接口同源;空编号/查不到墓位区域时不校验(交由后续流程) 20261012 新增,
+async function findSerialNoConflict(dataBase, serialNo, excludeIdRoom) {
+  const trimmed = serialNo === undefined || serialNo === null ? '' : String(serialNo).trim();
+  if (trimmed === '' || excludeIdRoom === undefined || excludeIdRoom === null) {
+    return null;
+  }
+  const regionRows = await pool.query(`select region from ${dataBase}.room where idRoom = ? limit 1`, [excludeIdRoom]);
+  if (!regionRows || regionRows.length === 0) {
+    return null;
+  }
+  const dupRows = await pool.query(
+    `select idRoom from ${dataBase}.room where region = ? and serialNo = ? and idRoom <> ? limit 1`,
+    [regionRows[0].region, trimmed, excludeIdRoom],
+  );
+  return dupRows && dupRows.length > 0 ? dupRows[0].idRoom : null;
+}
+
 // 新建墓位业务 20260923 新增/修改,
 router.post('/insert', async (req, res) => {
   public.normalizeBodyDates(req.body);
@@ -110,6 +128,16 @@ router.post('/insert', async (req, res) => {
     const payerPhone = req.body.payerPhone;
     const payerIDCard = req.body.payerIDCard;
     const serialNo = req.body.serialNo;
+
+    // 新建销售编号区内唯一校验:同区域已被其它墓位占用则拒绝保存并提示 20261012 新增,
+    try {
+      const conflictIdRoom = await findSerialNoConflict(req.data.dataBase, serialNo, idRoom);
+      if (conflictIdRoom !== null) {
+        return res.status(400).json({ error: '编号"' + String(serialNo).trim() + '"在本区域已被占用，请修改后再保存!' });
+      }
+    } catch (error) {
+      return public.handleQueryError(res, error);
+    }
 
     req.body.table = req.data.dataBase + '.sale';
     req.body.operator = req.data.userName;
@@ -390,6 +418,12 @@ router.post('/update', async (req, res) => {
       const row = results && results.length > 0 ? results[0] : null;
       const sqlList = [statement];
       const idRoom = row ? public.parseNumericParam(row.idRoom) : null;
+
+      // 修改销售编号区内唯一校验:同区域若被其它墓位占用(排除本墓位)则拒绝保存并提示 20261012 新增,
+      const conflictIdRoom = await findSerialNoConflict(req.data.dataBase, serialNo, idRoom);
+      if (conflictIdRoom !== null) {
+        return res.status(400).json({ error: '编号"' + String(serialNo).trim() + '"在本区域已被占用，请修改后再保存!' });
+      }
 
       const newPayerValid = payer !== undefined && payer !== null && String(payer).trim() !== '';
       const oldPayer = row ? row.oldPayer : null;
