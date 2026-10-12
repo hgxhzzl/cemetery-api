@@ -195,8 +195,27 @@ async function readOperatorRegions(idOperator) {
 //    杜绝“前端选不到但直接改参调用”越权取/写其它区域数据;
 // 2) 将解析好的名单挂到 req.operatorRegions,供列表接口在“未指定区域”时强制收窄,避免省略参数即拿到全量,
 // 无名单(未配置区域/平台管理员)时不注入也不拦截,维持原有权限口径 20261010 新增,
+// 区域名单按“自身所属区域”收窄本意是隔离数据;但“给操作员分配区域”是管理动作,分配的 region 不属于调用者
+// 自身筛选作用域,且 /api/operator-save 前缀已由 requirePowerByMenuName('operator') 把守,故对该写操作不做越权拦截;
+// 否则区域管理员在下拉里能选到范围外区域、提交却被本中间件 403(表现即“修改操作员提交失败”)20261012 新增,
+function isRegionAssignmentRequest(req) {
+  return (
+    req.method === 'POST' &&
+    (req.path === '/api/operator-save/insert' || req.path === '/api/operator-save/update')
+  );
+}
+
 async function requireRegionScope(req, res, next) {
   if (!req.data) {
+    return next();
+  }
+  // 区域分配写操作:仅注入名单供下游参考,跳过越权拦截(名单为空也照常放行)20261012 新增,
+  if (isRegionAssignmentRequest(req)) {
+    try {
+      req.operatorRegions = await fetchOperatorRegions(req);
+    } catch (error) {
+      req.operatorRegions = [];
+    }
     return next();
   }
   try {

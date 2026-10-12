@@ -913,3 +913,41 @@ test('buriedQuery/list: sortMode 切换园区优先与下葬日期优先排序',
     server.close();
   }
 });
+
+// requireRegionScope 区域分配豁免:给操作员分配区域(POST /api/operator-save/insert|update)不受调用者
+// 自身区域收窄拦截,否则区域管理员无法分配范围外区域;同一越权区域走普通业务路径仍应 403 20261012 新增,
+test('rbac.requireRegionScope: 操作员区域分配写操作放行,普通业务同值仍拦截', async () => {
+  const mockPool = createMockPool([{ region: '福东' }]);
+  database.setPoolForTesting(mockPool);
+  const rbac = require('../rbac');
+
+  const makeReq = (path) => ({
+    method: 'POST',
+    path,
+    originalUrl: path,
+    body: { region: '福东,福西' },
+    query: {},
+    // 非平台管理员且已配自身区域(名单=[福东]),才能验证“越权拦截”与“分配豁免”两条分支的区分 20261012 新增,
+    data: { userId: 1001, dataBase: 'gm_data_001', isAccount: 0, userName: 'tester' },
+  });
+  const makeRes = () => {
+    const res = { code: 0, status(c) { res.code = c; return res; }, json() { return res; } };
+    return res;
+  };
+
+  // 1) 分配路径:越过收窄,应调 next 且不 403
+  let called = false;
+  const passRes = makeRes();
+  await rbac.requireRegionScope(makeReq('/api/operator-save/update'), passRes, () => { called = true; });
+  assert.ok(called, 'operator-save/update 应放行');
+  assert.strictEqual(passRes.code, 0, 'operator-save/update 不应被 403');
+
+  // 2) 普通业务路径携带范围外区域:仍应 403 且不调 next
+  called = false;
+  const denyRes = makeRes();
+  await rbac.requireRegionScope(makeReq('/api/sale-save/update'), denyRes, () => { called = true; });
+  assert.ok(!called, '普通业务越权区域不应放行');
+  assert.strictEqual(denyRes.code, 403, '普通业务越权区域应 403');
+
+  database.resetPoolForTesting();
+});

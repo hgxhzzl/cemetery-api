@@ -83,14 +83,22 @@ router.get('/room', async (req, res) => {
   router.get('/canSale', async (req, res) => {
         // 可售墓位:返回全部记录(含已售),是否可售由前端根据 saleStatus 判断 20260916 修改,
         // 区域三级菜单进入时仅传区域不传园区，园区参数改为可选，为空时查该区域全部墓位 20260831 修改,
-        const conditions = ['isDeleted = 0', 'region = ?'];
+        // LEFT JOIN 活动预定记录带出 liaison/liaisonPhone（预定页卡片“预定人/手机号”行使用），
+        // 一穴一条约束下子查询 MAX 兑底防历史数据重复行放大;销售页不消费这两列，属可忽略的额外字段 20261012 新增,
+        const conditions = ['r.isDeleted = 0', 'r.region = ?'];
         const params = [req.query.region];
         if (req.query.park) {
-            conditions.push('park = ?');
+            conditions.push('r.park = ?');
             params.push(req.query.park);
         }
+        const sql = `SELECT r.*, rv.liaison AS reserveLiaison, rv.liaisonPhone AS reserveLiaisonPhone
+            FROM ${req.data.dataBase}.room r
+            LEFT JOIN (SELECT idRoom, MAX(liaison) AS liaison, MAX(liaisonPhone) AS liaisonPhone
+                FROM ${req.data.dataBase}.reserve WHERE isDeleted = 0 GROUP BY idRoom) rv
+            ON rv.idRoom = r.idRoom
+            WHERE ${conditions.join(' AND ')}`;
         try {
-            const results = await pool.query(`SELECT * FROM ${req.data.dataBase}.room WHERE ${conditions.join(' AND ')}`, params);
+            const results = await pool.query(sql, params);
             return public.respondList(res, results);
         } catch (error) {
             return public.handleQueryError(res, error);

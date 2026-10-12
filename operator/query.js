@@ -46,9 +46,23 @@ router.get('/duties', async (req, res) => {
     }
 });
 router.get('/team', async (req, res) => {
-    const table = " SELECT tagName as label,tagName as value FROM " + req.data.dataBase + ".taginfo WHERE";
+    const table = " SELECT tagName as label,tagName as value FROM " + req.data.dataBase +".taginfo WHERE";
     try {
         const results = await pool.query(table + " tagType ='team'");
+        return public.respondList(res, results);
+    } catch (error) {
+        return public.handleQueryError(res, error);
+    }
+})
+
+// 新建/修改操作员的"区域"多选需列出全部区域供分配,不能按当前操作员自身区域收窄:
+// /park-query/region 会做区域硬隔离(只回本操作员所属区域),用于业务/查询筛选页;但分配区域是管理动作,
+// 区域管理员据此只能把已有区域分给别人、管不了范围外的区域。本路由挂在 /api/operator-query 下由 operator 菜单守卫把关,
+// 返回全量区域标签(按 id 排序,与 /park-query/region 同序),不影响其余页面既有的收窄口径 20261012 新增,
+router.get('/region', async (req, res) => {
+    const table = " SELECT tagName as label,tagName as value FROM " + req.data.dataBase +".taginfo WHERE";
+    try {
+        const results = await pool.query(table + " tagType ='region' ORDER BY id");
         return public.respondList(res, results);
     } catch (error) {
         return public.handleQueryError(res, error);
