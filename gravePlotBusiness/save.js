@@ -139,26 +139,29 @@ router.post('/insert', async (req, res) => {
       return public.handleQueryError(res, error);
     }
 
-    // 新建销售预定有效性校验：该墓位若存在未到期活动预定（当前日期 < 预定限期），购墓人必须与预定联系人一致，否则拒绝成交 20261017 新增,
+    // 新建销售预定有效性校验：以 room.reservationExpireDate（墓位预定限期副本、与墓位卡片展示同源）为闸门——
+    // 购墓人=预定联系人可提交；购墓人≠联系人时，仅当已超期（当前日期 yyyy-mm-dd > 预定限期）方可提交，未超期（含限期当天）拒绝并提示；room 无限期(未预定)不受限 20261017 新增, 20261018 改用 room.reservationExpireDate 作闸门,
     try {
-      const reserveRows = await pool.query(
-        `SELECT liaison, reservationExpireDate FROM ${req.data.dataBase}.reserve
-          WHERE idRoom = ? AND isDeleted = 0 AND reservationExpireDate IS NOT NULL
-          ORDER BY reservationExpireDate DESC LIMIT 1`,
+      const roomReserveRows = await pool.query(
+        `SELECT rm.reservationExpireDate,
+            (SELECT rs.liaison FROM ${req.data.dataBase}.reserve rs
+              WHERE rs.idRoom = rm.idRoom AND rs.isDeleted = 0 LIMIT 1) AS liaison
+          FROM ${req.data.dataBase}.room rm
+          WHERE rm.idRoom = ? LIMIT 1`,
         [idRoom],
       );
-      const activeReserve = reserveRows && reserveRows.length > 0 ? reserveRows[0] : null;
-      if (activeReserve && activeReserve.reservationExpireDate) {
+      const roomReserve = roomReserveRows && roomReserveRows.length > 0 ? roomReserveRows[0] : null;
+      if (roomReserve && roomReserve.reservationExpireDate) {
         const today = new Date();
         today.setHours(0, 0, 0, 0);
-        const expireDay = new Date(activeReserve.reservationExpireDate);
+        const expireDay = new Date(roomReserve.reservationExpireDate);
         expireDay.setHours(0, 0, 0, 0);
-        // 当前日期小于预定限期（仍在有效期内）才校验购墓人=预定联系人；已到期（当前日期 >= 限期）放行不受限 20261017 新增,
-        if (expireDay.getTime() > today.getTime()) {
+        // 未超期（当前日期 <= 预定限期，含限期当天）才校验购墓人=预定联系人；已超期（当前日期 > 限期）放行不受限 20261017 新增 20261018 含限期当天,
+        if (expireDay.getTime() >= today.getTime()) {
           const buyerName = payer === undefined || payer === null ? '' : String(payer).trim();
-          const liaisonName = activeReserve.liaison === undefined || activeReserve.liaison === null ? '' : String(activeReserve.liaison).trim();
+          const liaisonName = roomReserve.liaison === undefined || roomReserve.liaison === null ? '' : String(roomReserve.liaison).trim();
           if (buyerName !== liaisonName) {
-            return res.status(400).json({ error: '该墓位存在未到期预定（预定联系人：' + liaisonName + '），购墓人与预定联系人不一致，不可提交!' });
+            return res.status(400).json({ error: '该墓位存在有效预定（预定联系人：' + liaisonName + '），购墓人与预定联系人不一致，不可提交!' });
           }
         }
       }
