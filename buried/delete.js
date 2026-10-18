@@ -48,28 +48,30 @@ router.get('/', async (req, res) => {
 
   const remain = countResults && countResults.length > 0 ? Number(countResults[0].cnt) : 0;
   if (remain === 0) {
-    const roomJson = {
+    // 已无其他活动下葬记录:墓位下葬状态回置未完成 20260907 保留,
+    sqlList.push(public.getUpdateByIdStatement({
       table: req.data.dataBase + '.room',
       operator: req.data.userName,
       idfield: 'idRoom',
       idvalue: idRoom,
       intoStatus: 'statusType.intoStatusEnum.incomplet',
-    };
-    sqlList.push(public.getUpdateByIdStatement(roomJson));
-    // 已无活动下葬记录:管理费起止日期一并清空 20260910 新增,
-    sqlList.push({
-      sql: `update ${req.data.dataBase}.room set startDate = null, endDate = null where idRoom = ?`,
-      params: [idRoom],
-    });
-  } else {
-    // 删除的可能是最早下葬记录:开始日期按剩余活动记录重新锚定;结束日期不动(保留收款顺延值) 20260910 新增,
-    sqlList.push({
-      sql:
-        `update ${req.data.dataBase}.room set ` +
-        `startDate = (select min(burialDate) from ${req.data.dataBase}.buried where idRoom = ? and isDeleted = 0) ` +
-        `where idRoom = ?`,
-      params: [idRoom, idRoom],
-    });
+    }));
+  }
+  // 下葬删除后统一维护管理期限(⑤):以剩余活动下葬记录最早日期为锚(归零则 anchorDay=null→起止置空、adminfee 记录保留);
+  // 无收款仅置 startDate/endDate=min,有收款整链重排 20261018 新增,
+  try {
+    let anchorDay = null;
+    if (remain > 0) {
+      const minRows = await pool.query(
+        `select min(burialDate) as minBurial from ${req.data.dataBase}.buried where idRoom = ? and isDeleted = 0`,
+        [idRoom],
+      );
+      anchorDay = public.feeMinDay(minRows && minRows.length > 0 ? minRows[0].minBurial : null);
+    }
+    const periodStatements = await public.applyFeePeriodRecascade(req.data.dataBase, idRoom, req.data.userName, anchorDay);
+    sqlList.push(...periodStatements);
+  } catch (error) {
+    return public.handleQueryError(res, error);
   }
 
   // 删除的下葬记录含联系人时,同步软删 contacts 中 同墓位/同名 的活动联系人(电话非空时一并匹配),并同步 room.contacts 聚合 20260916 新增,

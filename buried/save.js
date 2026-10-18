@@ -25,24 +25,30 @@ router.post('/insert', async (req, res) => {
   const sqlList = [];
   sqlList.push(buriedStatement);
 
-  // 管理费起止日期锚定:开始日期=该墓位活动下葬记录最早下葬日期;结束日期仅在为空时取同值(不覆盖收款顺延后的日期) 20260910 新增,
-  const anchorDateSql =
-    `update ${req.data.dataBase}.room set ` +
-    `startDate = (select min(burialDate) from ${req.data.dataBase}.buried where idRoom = ? and isDeleted = 0), ` +
-    `endDate = coalesce(endDate, (select min(burialDate) from ${req.data.dataBase}.buried where idRoom = ? and isDeleted = 0)) ` +
-    `where idRoom = ?`;
-  sqlList.push({ sql: anchorDateSql, params: [idRoom, idRoom, idRoom] });
+  // 下葬变动统一维护管理期限(⑤):变更后最早下葬日=min(现有活动下葬,本次新下葬日);无收款仅置 startDate/endDate=min,有收款整链重排 20261018 新增,
+  try {
+    const minRows = await pool.query(
+      `select min(burialDate) as minBurial from ${req.data.dataBase}.buried where idRoom = ? and isDeleted = 0`,
+      [idRoom],
+    );
+    const anchorDay = public.feeMinDay(
+      minRows && minRows.length > 0 ? minRows[0].minBurial : null,
+      req.body.burialDate,
+    );
+    const periodStatements = await public.applyFeePeriodRecascade(req.data.dataBase, idRoom, req.data.userName, anchorDay);
+    sqlList.push(...periodStatements);
+  } catch (error) {
+    return public.handleQueryError(res, error);
+  }
 
-  const json = {};
-  json.table = req.data.dataBase + '.room';
-  json.operator = req.data.userName;
-  json.idfield = 'idRoom';
-  json.idvalue = idRoom;
-  json.intoStatus = 'statusType.intoStatusEnum.buried';
-  const sqlRoom = public.getUpdateByIdStatement(json);
-  sqlList.push(sqlRoom);
-
-  // 安葬者聚合:活动下葬记录 deceased 空格分隔同步到 room.deceased 20260917 新增,
+  // 置墓位已下葬 + 安葬者聚合（原下葬页既有动作，重构后保留） 20260907/20260917 保留,
+  sqlList.push(public.getUpdateByIdStatement({
+    table: req.data.dataBase + '.room',
+    operator: req.data.userName,
+    idfield: 'idRoom',
+    idvalue: idRoom,
+    intoStatus: 'statusType.intoStatusEnum.buried',
+  }));
   sqlList.push(public.getRoomDeceasedSyncSql(req.data.dataBase, idRoom));
 
   // 联系人同步:按 名/电话 匹配活动联系人,执行 更新电话/更新姓名/新增,并同步 room.contacts 聚合 20260916 新增,
@@ -100,13 +106,21 @@ router.post('/update', async (req, res) => {
   const buriedStatement = public.getUpdateByIdStatement(req.body);
   sqlList.push(buriedStatement);
 
-  // 管理费起止日期锚定:开始日期=该墓位活动下葬记录最早下葬日期;结束日期仅在为空时取同值(不覆盖收款顺延后的日期) 20260910 新增,
-  const anchorDateSql =
-    `update ${req.data.dataBase}.room set ` +
-    `startDate = (select min(burialDate) from ${req.data.dataBase}.buried where idRoom = ? and isDeleted = 0), ` +
-    `endDate = coalesce(endDate, (select min(burialDate) from ${req.data.dataBase}.buried where idRoom = ? and isDeleted = 0)) ` +
-    `where idRoom = ?`;
-  sqlList.push({ sql: anchorDateSql, params: [idRoom, idRoom, idRoom] });
+  // 下葬变动统一维护管理期限(⑤):排除被改记录取其余最早下葬日再并入本次新下葬日;无收款仅置 startDate/endDate=min,有收款整链重排 20261018 新增,
+  try {
+    const minRows = await pool.query(
+      `select min(burialDate) as minBurial from ${req.data.dataBase}.buried where idRoom = ? and isDeleted = 0 and idBuried <> ?`,
+      [idRoom, idBuried],
+    );
+    const anchorDay = public.feeMinDay(
+      minRows && minRows.length > 0 ? minRows[0].minBurial : null,
+      req.body.burialDate,
+    );
+    const periodStatements = await public.applyFeePeriodRecascade(req.data.dataBase, idRoom, req.data.userName, anchorDay);
+    sqlList.push(...periodStatements);
+  } catch (error) {
+    return public.handleQueryError(res, error);
+  }
 
   // 修改不改变下葬状态,墓位保持已下葬 20260907 修改,
   const json = {};

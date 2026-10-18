@@ -219,13 +219,28 @@ router.post('/insert', async (req, res) => {
       operator: req.data.userName,
     }));
 
-    // 下葬日期非空时同步墓位管理费日期与下葬状态:startDate=burialDate;endDate 仅在为空时取 burialDate;intoStatus 置已下葬(销带下葬场景补齐) 20261004 新增,
+    // 下葬日期非空时置墓位已下葬状态(销带下葬场景补齐) 20261004 新增;管理期限并入下葬例程A统一维护(G1),不再走"有收款就不动"旧口径 20261018 调整,
     const burialDateValid = burialDate !== undefined && burialDate !== null && String(burialDate).trim() !== '';
     if (burialDateValid) {
       sqlList.push({
-        sql: `update ${req.data.dataBase}.room set startDate = ?, endDate = coalesce(endDate, ?), intoStatus = ? where idRoom = ?`,
-        params: [burialDate, burialDate, 'statusType.intoStatusEnum.buried', idRoom],
+        sql: `update ${req.data.dataBase}.room set intoStatus = ? where idRoom = ?`,
+        params: ['statusType.intoStatusEnum.buried', idRoom],
       });
+      // 销带下葬并入下葬例程A统一维护管理期限:变更后最早下葬日=min(现有活动下葬,本次下葬日);有收款整链重排、无收款置 startDate=endDate=min 20261018 G1 新增,
+      try {
+        const minRows = await pool.query(
+          `select min(burialDate) as minBurial from ${req.data.dataBase}.buried where idRoom = ? and isDeleted = 0`,
+          [idRoom],
+        );
+        const anchorDay = public.feeMinDay(
+          minRows && minRows.length > 0 ? minRows[0].minBurial : null,
+          burialDate,
+        );
+        const periodStatements = await public.applyFeePeriodRecascade(req.data.dataBase, idRoom, req.data.userName, anchorDay);
+        sqlList.push(...periodStatements);
+      } catch (error) {
+        return public.handleQueryError(res, error);
+      }
     }
 
     if (payer !== undefined && payer !== null && String(payer).trim() !== '') {
@@ -305,13 +320,21 @@ router.post('/insert', async (req, res) => {
 
     const sqlList = [public.getInsertStatement(req.body)];
 
-    // 管理费起止日期锚定:开始日期=该墓位活动下葬记录最早下葬日期;结束日期仅在为空时取同值(同下葬页) 20260923 新增,
-    const anchorDateSql =
-      `update ${req.data.dataBase}.room set ` +
-      `startDate = (select min(burialDate) from ${req.data.dataBase}.buried where idRoom = ? and isDeleted = 0), ` +
-      `endDate = coalesce(endDate, (select min(burialDate) from ${req.data.dataBase}.buried where idRoom = ? and isDeleted = 0)) ` +
-      `where idRoom = ?`;
-    sqlList.push({ sql: anchorDateSql, params: [idRoom, idRoom, idRoom] });
+    // 下葬变动统一维护管理期限(同下葬页新增):变更后最早下葬日=min(现有活动下葬,本次下葬日);无收款仅置 startDate/endDate=min,有收款整链重排 20261018 ⑤ 新增,
+    try {
+      const minRows = await pool.query(
+        `select min(burialDate) as minBurial from ${req.data.dataBase}.buried where idRoom = ? and isDeleted = 0`,
+        [idRoom],
+      );
+      const anchorDay = public.feeMinDay(
+        minRows && minRows.length > 0 ? minRows[0].minBurial : null,
+        req.body.burialDate,
+      );
+      const periodStatements = await public.applyFeePeriodRecascade(req.data.dataBase, idRoom, req.data.userName, anchorDay);
+      sqlList.push(...periodStatements);
+    } catch (error) {
+      return public.handleQueryError(res, error);
+    }
 
     const json = {
       table: req.data.dataBase + '.room',
@@ -534,6 +557,24 @@ router.post('/update', async (req, res) => {
         }
         // room.deceased 聚合同步:活动下葬记录 deceased 空格分隔同步到 room.deceased(逻辑同下葬页修改),随事务一致 20260923 新增,
         sqlList.push(public.getRoomDeceasedSyncSql(req.data.dataBase, idRoom));
+
+        // 销带下葬并入下葬例程A统一维护管理期限(G1,口径同新建):排除被改 buried 取其余活动最早下葬日再并入本次下葬日(本次清空日期也会反映);有收款整链重排、无收款置 startDate=endDate=min 20261018 统一定义 20261018 G1 改造,
+        const excludeIdBuried = existing && existing.length > 0 ? existing[0].idBuried : null;
+        const minRows = excludeIdBuried !== null
+          ? await pool.query(
+              `select min(burialDate) as minBurial from ${req.data.dataBase}.buried where idRoom = ? and isDeleted = 0 and idBuried <> ?`,
+              [idRoom, excludeIdBuried],
+            )
+          : await pool.query(
+              `select min(burialDate) as minBurial from ${req.data.dataBase}.buried where idRoom = ? and isDeleted = 0`,
+              [idRoom],
+            );
+        const anchorDay = public.feeMinDay(
+          minRows && minRows.length > 0 ? minRows[0].minBurial : null,
+          burialDate,
+        );
+        const periodStatements = await public.applyFeePeriodRecascade(req.data.dataBase, idRoom, req.data.userName, anchorDay);
+        sqlList.push(...periodStatements);
       }
 
       return public.Transaction(sqlList, res);
@@ -622,13 +663,21 @@ router.post('/update', async (req, res) => {
 
     sqlList.push(public.getUpdateByIdStatement(req.body));
 
-    // 管理费起止日期锚定(同下葬页修改) 20260923 新增,
-    const anchorDateSql =
-      `update ${req.data.dataBase}.room set ` +
-      `startDate = (select min(burialDate) from ${req.data.dataBase}.buried where idRoom = ? and isDeleted = 0), ` +
-      `endDate = coalesce(endDate, (select min(burialDate) from ${req.data.dataBase}.buried where idRoom = ? and isDeleted = 0)) ` +
-      `where idRoom = ?`;
-    sqlList.push({ sql: anchorDateSql, params: [idRoom, idRoom, idRoom] });
+    // 下葬变动统一维护管理期限(同下葬页修改):排除被改记录取其余最早下葬日再并入本次下葬日;无收款仅置 startDate/endDate=min,有收款整链重排 20261018 ⑤ 新增,
+    try {
+      const minRows = await pool.query(
+        `select min(burialDate) as minBurial from ${req.data.dataBase}.buried where idRoom = ? and isDeleted = 0 and idBuried <> ?`,
+        [idRoom, idBuried],
+      );
+      const anchorDay = public.feeMinDay(
+        minRows && minRows.length > 0 ? minRows[0].minBurial : null,
+        req.body.burialDate,
+      );
+      const periodStatements = await public.applyFeePeriodRecascade(req.data.dataBase, idRoom, req.data.userName, anchorDay);
+      sqlList.push(...periodStatements);
+    } catch (error) {
+      return public.handleQueryError(res, error);
+    }
 
     const json = {
       table: req.data.dataBase + '.room',

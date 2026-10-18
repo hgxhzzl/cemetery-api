@@ -307,6 +307,158 @@ exports.buildContactsSyncStatements = async function (dataBase, idRoom, contacts
   })];
 }
 
+// ==================== 管理费期限链式顺延（收管理费新建/修改/删除共用口径） ====================
+// 该墓位全部活动收款记录按 createDate 升序链式顺延：首条开始日期=墓位锚定起始日(room.startDate，即最早下葬日期；为空回落本次提交/剩余记录最早开始日期)，
+// 其后每条开始=上一条结束，结束=开始+该条缴费年限；room.endDate 取链尾。提升自 adminfee/save.js 供删除入口复用，避免各入口手写顺延产生偏差 20261018 新增,
+
+// 空值安全转本地零点 Date：库列 datetime 经 mysql2 回传 Date、提交值为 YYYY-MM-DD 串；无效返回 null 20261018 新增,
+function toFeeDay(value) {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : new Date(value.getTime());
+  }
+  const parsed = new Date(String(value).replace(' ', 'T'));
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function addFeeYears(dateObj, years) {
+  const shifted = new Date(dateObj.getTime());
+  shifted.setFullYear(shifted.getFullYear() + years);
+  return shifted;
+}
+
+exports.fmtFeeDay = function (dateObj) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${dateObj.getFullYear()}-${pad(dateObj.getMonth() + 1)}-${pad(dateObj.getDate())}`;
+}
+
+// 空值安全的天级格式化，用于"库中现值 vs 链算目标值"的等值比较 20261018 新增,
+exports.feeDayStr = function (value) {
+  const d = toFeeDay(value);
+  return d ? exports.fmtFeeDay(d) : '';
+}
+
+// 链式计算：orderedRows 须已按 createDate 升序且携带本次提交的最新年限值；
+// 年限为空/≤0 的记录保留其原结束日期(晚于链起点时)否则结束=开始——防止无年限历史记录把整条链拽回 20261018 新增,
+exports.computeFeePeriodCascade = function (anchorDay, orderedRows) {
+  let cursor = anchorDay;
+  const targets = [];
+  orderedRows.forEach((row) => {
+    const start = cursor;
+    const years = Number(row.termYears) || 0;
+    let end;
+    if (years > 0) {
+      end = addFeeYears(start, years);
+    } else {
+      const original = toFeeDay(row.endDate);
+      end = original && original.getTime() > start.getTime() ? original : start;
+    }
+    targets.push({ row, startDate: exports.fmtFeeDay(start), endDate: exports.fmtFeeDay(end) });
+    cursor = end;
+  });
+  return { targets, tailDate: exports.fmtFeeDay(cursor) };
+}
+
+// 锚定起始日（统一定义）：一律优先取该墓位最早活动下葬日期 min(burialDate)——直接以下葬事实为准，不读可能滞后的 room.startDate 副本;
+// 无活动下葬记录时回落 room.startDate(先收款后下葬/历史场景)，仍为空再回落调用方提供的兜底日期；均无则返回 null 由调用方兜底 20261018 统一定义,
+exports.findFeePeriodAnchor = async function (dataBase, idRoom, bodyStartDate) {
+  const minRows = await pool.query(
+    `select min(burialDate) as minBurial from ${dataBase}.buried where idRoom = ? and isDeleted = 0`,
+    [idRoom],
+  );
+  const minBurial = minRows && minRows.length > 0 ? toFeeDay(minRows[0].minBurial) : null;
+  if (minBurial) {
+    return minBurial;
+  }
+  const roomRows = await pool.query(`select startDate from ${dataBase}.room where idRoom = ? limit 1`, [idRoom]);
+  const roomStart = roomRows && roomRows.length > 0 ? toFeeDay(roomRows[0].startDate) : null;
+  if (roomStart) {
+    return roomStart;
+  }
+  return toFeeDay(bodyStartDate);
+}
+
+// 读取该墓位全部活动收款记录（createDate 升序，同秒按主键稳定排序） 20261018 新增,
+exports.listActiveFeeRows = async function (dataBase, idRoom) {
+  return pool.query(
+    `select idAdminfee, termYears, startDate, endDate from ${dataBase}.adminfee
+      where idRoom = ? and isDeleted = 0 order by createDate asc, idAdminfee asc`,
+    [idRoom],
+  );
+}
+
+// 安全取多个日期值(可混合 Date/字符串/null)中的最早本地零点 Date；全无效返回 null 20261018 ⑤ 新增,
+exports.feeMinDay = function (...values) {
+  let earliest = null;
+  values.forEach((v) => {
+    const d = toFeeDay(v);
+    if (d && (!earliest || d.getTime() < earliest.getTime())) {
+      earliest = d;
+    }
+  });
+  return earliest;
+}
+
+// 该墓位是否存在可用于锚定的活动下葬记录(即有下葬日期的活动 buried)——收管理费前置校验用(② 无锚定下葬不可收款)；
+// 仅“有日期下葬”才作锚:避免无日期 buried 行使 min(burialDate) 为空、收款后又被下次下葬变动归零软删 20261018 新增,
+exports.hasActiveBurial = async function (dataBase, idRoom) {
+  const rows = await pool.query(
+    `select 1 as hit from ${dataBase}.buried where idRoom = ? and isDeleted = 0 and burialDate is not null limit 1`,
+    [idRoom],
+  );
+  return !!(rows && rows.length > 0);
+}
+
+// 下葬增/删/改后统一维护该墓位管理期限（⑤/Rule2）：anchorDay 为变更后最早活动下葬日期（由调用方按增/删/改语义算好传入）——
+// 无活动下葬记录(anchorDay 为空)时 room.startDate/endDate 置空,并软删该墓位全部活动收款记录(无埋则 adminfee 一并软删,Rule2)；
+// 无活动收款记录时仅将 room.startDate/endDate 同置 anchorDay（无条件覆盖）；
+// 有收款记录时以 anchorDay 为锚整链重排 adminfee 起止，并写回 room.startDate=anchorDay、room.endDate=链尾 20261018 ⑤ 新增, 20261018 Rule2 归零软删 adminfee,
+exports.applyFeePeriodRecascade = async function (dataBase, idRoom, operator, anchorDay) {
+  if (!anchorDay) {
+    return [
+      exports.getUpdateByConditionStatement({
+        table: dataBase + '.adminfee',
+        condition: { sql: 'idRoom = ? AND isDeleted = 0', params: [idRoom] },
+        isDeleted: 1,
+        operator,
+      }),
+      {
+        sql: `update ${dataBase}.room set startDate = null, endDate = null where idRoom = ?`,
+        params: [idRoom],
+      },
+    ];
+  }
+  const anchorStr = exports.fmtFeeDay(anchorDay);
+  const feeRows = await exports.listActiveFeeRows(dataBase, idRoom);
+  if (!feeRows || feeRows.length === 0) {
+    return [{
+      sql: `update ${dataBase}.room set startDate = ?, endDate = ? where idRoom = ?`,
+      params: [anchorStr, anchorStr, idRoom],
+    }];
+  }
+  const { targets, tailDate } = exports.computeFeePeriodCascade(anchorDay, feeRows);
+  const statements = [];
+  targets.forEach(({ row, startDate: startStr, endDate: endStr }) => {
+    if (exports.feeDayStr(row.startDate) !== startStr || exports.feeDayStr(row.endDate) !== endStr) {
+      statements.push(exports.getUpdateByIdStatement({
+        table: dataBase + '.adminfee',
+        idfield: 'idAdminfee',
+        idvalue: row.idAdminfee,
+        startDate: startStr,
+        endDate: endStr,
+        operator,
+      }));
+    }
+  });
+  statements.push({
+    sql: `update ${dataBase}.room set startDate = ?, endDate = ? where idRoom = ?`,
+    params: [anchorStr, tailDate, idRoom],
+  });
+  return statements;
+}
+
 //墓位预定限期副本同步的语句模板:取该墓位活动预定记录的预定限期,无活动预定时自动置空,
 //与 contacts/deceased 两个聚合同步同属"墓位冗余列由业务表反推"口径,预定登记/修改/取消三条路径均复用本模板避免各处手写产生偏差;
 //MAX 兜底防一穴多条活动预定(历史脏数据)时子查询返回多行报错;whereClause 里的值均已经过 parseNumericParam 校验 20261011 新增,
