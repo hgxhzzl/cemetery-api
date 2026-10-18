@@ -139,6 +139,33 @@ router.post('/insert', async (req, res) => {
       return public.handleQueryError(res, error);
     }
 
+    // 新建销售预定有效性校验：该墓位若存在未到期活动预定（当前日期 < 预定限期），购墓人必须与预定联系人一致，否则拒绝成交 20261017 新增,
+    try {
+      const reserveRows = await pool.query(
+        `SELECT liaison, reservationExpireDate FROM ${req.data.dataBase}.reserve
+          WHERE idRoom = ? AND isDeleted = 0 AND reservationExpireDate IS NOT NULL
+          ORDER BY reservationExpireDate DESC LIMIT 1`,
+        [idRoom],
+      );
+      const activeReserve = reserveRows && reserveRows.length > 0 ? reserveRows[0] : null;
+      if (activeReserve && activeReserve.reservationExpireDate) {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const expireDay = new Date(activeReserve.reservationExpireDate);
+        expireDay.setHours(0, 0, 0, 0);
+        // 当前日期小于预定限期（仍在有效期内）才校验购墓人=预定联系人；已到期（当前日期 >= 限期）放行不受限 20261017 新增,
+        if (expireDay.getTime() > today.getTime()) {
+          const buyerName = payer === undefined || payer === null ? '' : String(payer).trim();
+          const liaisonName = activeReserve.liaison === undefined || activeReserve.liaison === null ? '' : String(activeReserve.liaison).trim();
+          if (buyerName !== liaisonName) {
+            return res.status(400).json({ error: '该墓位存在未到期预定（预定联系人：' + liaisonName + '），购墓人与预定联系人不一致，不可提交!' });
+          }
+        }
+      }
+    } catch (error) {
+      return public.handleQueryError(res, error);
+    }
+
     req.body.table = req.data.dataBase + '.sale';
     req.body.operator = req.data.userName;
     let price = req.body.realPrice.toString();
@@ -177,8 +204,20 @@ router.post('/insert', async (req, res) => {
     json.saleStatus = 'statusType.saleStatusEnum.sold';
     json.buyer = payer === undefined || payer === null ? '' : payer;
     json.serialNo = serialNo === undefined || serialNo === null ? '' : serialNo;
+    // 销售成交：预定信息整体清除——墓位预定状态复位为未预定（与新删除的 reserve 记录一致，避免墓位查询按已预定过滤误计）20261017 新增,
+    json.reserveStatus = 'statusType.reserveStatusEnum.unreserved';
+    // 销售成交：预定限期副本置空（room.reservationExpireDate = null，对应预定记录随下方软删一并清除）20261017 新增,
+    json.reservationExpireDate = null;
     var sqlRoom = public.getUpdateByIdStatement(json);
     sqlList.push(sqlRoom);
+
+    // 销售成交后清除该墓位对应的活动预定记录（reserve 软删 isDeleted=1，与全系统软删口径一致；本形态仅新建走此分支）20261017 新增,
+    sqlList.push(public.getUpdateByConditionStatement({
+      table: req.data.dataBase + '.reserve',
+      condition: { sql: 'idRoom = ? AND isDeleted = 0', params: [idRoom] },
+      isDeleted: 1,
+      operator: req.data.userName,
+    }));
 
     // 下葬日期非空时同步墓位管理费日期与下葬状态:startDate=burialDate;endDate 仅在为空时取 burialDate;intoStatus 置已下葬(销带下葬场景补齐) 20261004 新增,
     const burialDateValid = burialDate !== undefined && burialDate !== null && String(burialDate).trim() !== '';

@@ -4,61 +4,6 @@ const pool = require('../database');
 const public = require('../public');
 module.exports = router;
 
-// 构建联系人同步语句:同墓位活动联系人按 名/电话 匹配,联系人名/电话/身份证号一并同步 20260917 修改,
-// 同名存在且电话/身份证号有变化则更新;同名不存在但同电话存在则更新联系人名与身份证号;名/电话均不存在则新增;联系人名为空不处理 20260916 新增,
-async function buildContactsSyncStatements(dataBase, idRoom, contactsName, contactsPhone, contactsIDCard, operator) {
-  const nameValid = contactsName !== undefined && contactsName !== null && String(contactsName).trim() !== '';
-  if (!nameValid) {
-    return [];
-  }
-
-  const name = String(contactsName).trim();
-  const phone = String(contactsPhone === undefined || contactsPhone === null ? '' : contactsPhone).trim();
-  const idCard = String(contactsIDCard === undefined || contactsIDCard === null ? '' : contactsIDCard).trim();
-  const table = dataBase + '.contacts';
-  const rows = await pool.query(
-    `select idContacts, contacts, contactsPhone, contactsIDCard from ${table} where idRoom = ? and isDeleted = 0`,
-    [idRoom],
-  );
-
-  const sameName = rows.find((item) => String(item.contacts || '').trim() === name);
-  if (sameName) {
-    // 同名活动联系人存在:电话或身份证号有变化才更新
-    if (String(sameName.contactsPhone || '').trim() !== phone || String(sameName.contactsIDCard || '').trim() !== idCard) {
-      return [public.getUpdateByConditionStatement({
-        table,
-        condition: { sql: 'idContacts = ? AND isDeleted = 0', params: [sameName.idContacts] },
-        contactsPhone: phone,
-        contactsIDCard: idCard,
-        operator,
-      })];
-    }
-    return [];
-  }
-
-  const samePhone = phone !== '' ? rows.find((item) => String(item.contactsPhone || '').trim() === phone) : null;
-  if (samePhone) {
-    // 同名不存在但电话相同:更新联系人名与身份证号
-    return [public.getUpdateByConditionStatement({
-      table,
-      condition: { sql: 'idContacts = ? AND isDeleted = 0', params: [samePhone.idContacts] },
-      contacts: name,
-      contactsIDCard: idCard,
-      operator,
-    })];
-  }
-
-  // 名/电话均不存在:新增一条联系人
-  return [public.getInsertStatement({
-    table,
-    idRoom,
-    contacts: name,
-    contactsPhone: phone,
-    contactsIDCard: idCard,
-    operator,
-  })];
-}
-
 // 新建下葬:插入一条下葬记录并把墓位下葬状态直接置为已下葬;取消预定/核对/完成状态机 20260907 修改,
 router.post('/insert', async (req, res) => {
   public.normalizeBodyDates(req.body);
@@ -102,7 +47,7 @@ router.post('/insert', async (req, res) => {
 
   // 联系人同步:按 名/电话 匹配活动联系人,执行 更新电话/更新姓名/新增,并同步 room.contacts 聚合 20260916 新增,
   try {
-    const contactsStatements = await buildContactsSyncStatements(
+    const contactsStatements = await public.buildContactsSyncStatements(
       req.data.dataBase, idRoom, contactsName, contactsPhone, contactsIDCard, req.data.userName,
     );
     if (contactsStatements.length > 0) {
@@ -180,7 +125,7 @@ router.post('/update', async (req, res) => {
   // 同步后旧联系人不再被新值引用(改名/清空)时,软删旧记录避免残留 20260916 新增,
   try {
     let contactsChanged = false;
-    const contactsStatements = await buildContactsSyncStatements(
+    const contactsStatements = await public.buildContactsSyncStatements(
       req.data.dataBase, idRoom, contactsName, contactsPhone, contactsIDCard, req.data.userName,
     );
     if (contactsStatements.length > 0) {

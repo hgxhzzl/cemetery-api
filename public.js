@@ -251,6 +251,62 @@ exports.getRoomDeceasedSyncSql = function (dataBase, idRoom) {
   );
 }
 
+//构建联系人同步语句:同墓位活动联系人按 名/电话 匹配,联系人名/电话/身份证号一并同步 20260917 修改,
+//同名存在且电话/身份证号有变化则更新;同名不存在但同电话存在则更新联系人名与身份证号;名/电话均不存在则新增;联系人名为空不处理 20260916 新增,
+//从 buried/save.js 提升为公共函数,供下葬/收管理费等页复用同一口径,避免各页手写产生偏差 20261017 新增,
+exports.buildContactsSyncStatements = async function (dataBase, idRoom, contactsName, contactsPhone, contactsIDCard, operator) {
+  const nameValid = contactsName !== undefined && contactsName !== null && String(contactsName).trim() !== '';
+  if (!nameValid) {
+    return [];
+  }
+
+  const name = String(contactsName).trim();
+  const phone = String(contactsPhone === undefined || contactsPhone === null ? '' : contactsPhone).trim();
+  const idCard = String(contactsIDCard === undefined || contactsIDCard === null ? '' : contactsIDCard).trim();
+  const table = dataBase + '.contacts';
+  const rows = await pool.query(
+    `select idContacts, contacts, contactsPhone, contactsIDCard from ${table} where idRoom = ? and isDeleted = 0`,
+    [idRoom],
+  );
+
+  const sameName = rows.find((item) => String(item.contacts || '').trim() === name);
+  if (sameName) {
+    // 同名活动联系人存在:电话或身份证号有变化才更新
+    if (String(sameName.contactsPhone || '').trim() !== phone || String(sameName.contactsIDCard || '').trim() !== idCard) {
+      return [exports.getUpdateByConditionStatement({
+        table,
+        condition: { sql: 'idContacts = ? AND isDeleted = 0', params: [sameName.idContacts] },
+        contactsPhone: phone,
+        contactsIDCard: idCard,
+        operator,
+      })];
+    }
+    return [];
+  }
+
+  const samePhone = phone !== '' ? rows.find((item) => String(item.contactsPhone || '').trim() === phone) : null;
+  if (samePhone) {
+    // 同名不存在但电话相同:更新联系人名与身份证号
+    return [exports.getUpdateByConditionStatement({
+      table,
+      condition: { sql: 'idContacts = ? AND isDeleted = 0', params: [samePhone.idContacts] },
+      contacts: name,
+      contactsIDCard: idCard,
+      operator,
+    })];
+  }
+
+  // 名/电话均不存在:新增一条联系人
+  return [exports.getInsertStatement({
+    table,
+    idRoom,
+    contacts: name,
+    contactsPhone: phone,
+    contactsIDCard: idCard,
+    operator,
+  })];
+}
+
 //墓位预定限期副本同步的语句模板:取该墓位活动预定记录的预定限期,无活动预定时自动置空,
 //与 contacts/deceased 两个聚合同步同属"墓位冗余列由业务表反推"口径,预定登记/修改/取消三条路径均复用本模板避免各处手写产生偏差;
 //MAX 兜底防一穴多条活动预定(历史脏数据)时子查询返回多行报错;whereClause 里的值均已经过 parseNumericParam 校验 20261011 新增,

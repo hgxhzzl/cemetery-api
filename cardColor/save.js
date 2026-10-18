@@ -5,8 +5,8 @@ const public = require('../public');
 
 module.exports = router;
 
-// 四个卡片状态 key 固定,与前端 utils/cardTheme.ts 的 CARD_COLOR_STATES 一一对应 20261011 新增,
-const CARD_COLOR_STATES = ['unsold', 'sold', 'buried', 'expired'];
+// 五个卡片状态 key 固定,与前端 utils/cardTheme.ts 的 CARD_COLOR_STATES 一一对应 20261011 新增 20261017 加 reserved,
+const CARD_COLOR_STATES = ['unsold', 'reserved', 'sold', 'buried', 'expired'];
 // 色值只接受 6 位十六进制:该值最终会写进 CSS 变量,放宽格式等于放开样式注入 20261011 新增,
 const HEX_PATTERN = /^#[0-9a-f]{6}$/i;
 

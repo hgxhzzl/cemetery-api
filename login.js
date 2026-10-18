@@ -16,7 +16,7 @@ router.post('/', async (req, res) => {
   try {
     // 检查用户名是否存在
     const results = await pool.query('SELECT a.idOperator as userid,a.name as username,a.phone as phone,b.endDate as endDate,'+
-      'b.dataBaseName as dataBaseName,b.account as accountName,a.isAccount as isAccount,a.password as password '+
+      'b.dataBaseName as dataBaseName,b.account as accountName,a.isAccount as isAccount,a.password as password,a.termYears as termYears '+
       'FROM gm_data_000.operator a,gm_data_000.account b '+
       'WHERE a.dataBaseName = b.dataBaseName and a.isDeleted = 0 and b.isDeleted = 0 and a.phone = ?', [phone]);
     if (results.length === 0) {
@@ -63,6 +63,8 @@ router.post('/', async (req, res) => {
     json.isAccount = Number(user.isAccount);
     // 透传账户名称（account 表 account 字段），供系统左上角 logo 文字展示 20261005 新增,
     json.accountName = user.accountName || '';
+    // 透传当前操作员缴费年限（operator.termYears，逗号分隔串），供收管理费等页作为下拉候选 20261017 新增,
+    json.termYears = user.termYears || '';
     json.userInfo = {roles:[]};
     // roles 附带菜单 name(menuName),前端按稳定 name 匹配权限,菜单 id 因排序调整变化时不需改代码 20260919 修复,
     const sql = 'SELECT a.*, m.name AS menuName FROM gm_data_000.operator_power a LEFT JOIN gm_data_000.menu m ON m.id = a.idMenu WHERE a.idOperator = ?';

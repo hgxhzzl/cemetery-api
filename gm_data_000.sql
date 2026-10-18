@@ -201,6 +201,7 @@ CREATE TABLE `operator` (
   `dataBaseName` varchar(20) NOT NULL DEFAULT '' COMMENT '数据库名',
   `joinDate` date DEFAULT NULL COMMENT '入职日期',
   `isMaintenance` smallint(1) unsigned zerofill DEFAULT '0' COMMENT '是否运维',
+  `termYears` varchar(255) DEFAULT '' COMMENT 'termYears',
   PRIMARY KEY (`idOperator`) USING BTREE,
   KEY `pk_id_gm_accout` (`idOperator`) USING BTREE
 ) ENGINE=InnoDB AUTO_INCREMENT=1000 DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
@@ -208,7 +209,7 @@ CREATE TABLE `operator` (
 -- ----------------------------
 -- Records of operator
 -- ----------------------------
-INSERT INTO `operator` VALUES (1000, '示例管理员', '13766891959', '职员', '销售', 'statusType.useStatusEnum.use', '$2a$10$JHmbFPcx68e.PJJFnkk7CeKDKR5ot7wlpyUpk0dy.DBTrTFNDs27e', '', '示例管理员', '2026-08-27 13:03:47', '2024-01-10 00:00:00', 0, 1, 'gm_data_000', '2026-08-01', 0);
+INSERT INTO `operator` VALUES (1000, '示例管理员', '13766891959', '职员', '销售', 'statusType.useStatusEnum.use', '$2a$10$JHmbFPcx68e.PJJFnkk7CeKDKR5ot7wlpyUpk0dy.DBTrTFNDs27e', '', '示例管理员', '2026-08-27 13:03:47', '2024-01-10 00:00:00', 0, 1, 'gm_data_000', '2026-08-01', 0, '');
 
 -- ----------------------------
 -- Table structure for operator_power

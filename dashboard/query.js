@@ -78,6 +78,7 @@ router.get('/summary', async (req, res) => {
 
 // 首页管理到期记录分页：endDate 已到期（<=当天）且未迁出的墓位，按区域过滤、服务端分页，
 // 供首页管理到期卡片滚动加载（每页 40 条，同销售查询页无限滚动方式）20260926 新增
+// 排序按到期日期降序（最近到期在前），同日期按 idRoom 降序保证分页稳定 20261017 修改
 // 未迁出条件用空值安全写法（transferOutStatus 默认 NULL，仅撤销迁出时写 notOut），与 managementPeriod 查询一致
 router.get('/expired-list', async (req, res) => {
     const db = req.data.dataBase;
@@ -105,7 +106,7 @@ router.get('/expired-list', async (req, res) => {
         const countResults = await pool.query('SELECT COUNT(*) AS total FROM ' + db + '.room r WHERE ' + whereSql, params);
         const dataSql = 'SELECT r.idRoom, r.region, r.park, r.xyNumber, DATE_FORMAT(r.endDate, \'%Y-%m-%d\') AS endDate, r.contacts ' +
             'FROM ' + db + '.room r WHERE ' + whereSql + ' ' +
-            'ORDER BY r.endDate ASC, r.idRoom ASC ' +
+            'ORDER BY r.endDate DESC, r.idRoom DESC ' +
             'LIMIT ? OFFSET ?';
         const results = await pool.query(dataSql, [...params, pageSize, (current - 1) * pageSize]);
         // 分页结果：list 当前页数据，total 总记录数供卡片标题条数展示与滚动加载判断 20260926 新增
