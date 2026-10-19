@@ -632,6 +632,48 @@ test('rbac: 操作员具备菜单动作权限时放行,否则 403', async () => 
   }
 });
 
+test('rbac: 按菜单 name 守卫的占位符顺序与参数数组一致(防位置绑定错位)', async () => {
+  // 回归 20261019:权限查询单语句化时把 m.name IN (?) 写在 JOIN 段,其占位符早于 WHERE 的 a.idOperator = ?;
+  // mysql2 按占位符出现顺序消费参数数组,于是菜单名被绑给 idOperator、userId 被绑给 m.name,命中恒为空,
+  // 表现为所有非平台管理员账号打开业务页(墓位设置/选择设置等)均 403“缺少该菜单操作权限”。
+  // mock 池不解析 SQL,故此处直接断言 SQL 里的占位符次序与参数数组内容 20261019 新增,
+  const mockPool = createMockPool([{ 1: 1 }]);
+  database.setPoolForTesting(mockPool);
+
+  const rbac = require('../rbac');
+  const app = express();
+  app.use((req, res, next) => {
+    req.data = { dataBase: 'gm_data_001', userName: 'tester', phone: '13800138000', userId: 2000, isAccount: 0 };
+    next();
+  });
+  app.get('/guard-name', rbac.requirePowerByMenuName('room'), (req, res) => res.status(200).json({ code: 0 }));
+  app.get('/guard-any', rbac.requirePowerByAnyMenuName('room', 'sale'), (req, res) => res.status(200).json({ code: 0 }));
+  const server = app.listen(0);
+  try {
+    const base = `http://127.0.0.1:${server.address().port}`;
+    assert.strictEqual((await fetch(`${base}/guard-name`)).status, 200);
+    assert.strictEqual((await fetch(`${base}/guard-any`)).status, 200);
+
+    const nameCall = mockPool.calls.find((call) => call.sql.includes('operator_power') && call.params.length === 2);
+    const anyCall = mockPool.calls.find((call) => call.sql.includes('operator_power') && call.params.length === 3);
+    for (const call of [nameCall, anyCall]) {
+      assert.ok(call, '应命中一条 operator_power 权限查询');
+      // 首位参数必须是 userId,且每个 ? 都有对应参数
+      assert.strictEqual(call.params[0], 2000);
+      assert.strictEqual((call.sql.match(/\?/g) || []).length, call.params.length);
+      // idOperator 的 ? 必须早于菜单名的 ? 出现,否则位置绑定会互换
+      const idIndex = call.sql.indexOf('a.idOperator = ?');
+      const nameIndex = call.sql.indexOf('m.name IN (');
+      assert.ok(idIndex > -1 && nameIndex > -1);
+      assert.ok(idIndex < nameIndex, '菜单名占位符必须排在 a.idOperator 占位符之后');
+    }
+    assert.deepStrictEqual(nameCall.params, [2000, 'room']);
+    assert.deepStrictEqual(anyCall.params, [2000, 'room', 'sale']);
+  } finally {
+    server.close();
+  }
+});
+
 test('operator/save password: 非平台管理员跨租户改密返回 403', async () => {
   // 目标操作员属于 gm_data_002,调用者租户为 gm_data_001 → 跨租户拒绝
   const mockPool = createMockPool([{ idOperator: 1000, dataBaseName: 'gm_data_002', isAccount: 1, password: 'x' }]);

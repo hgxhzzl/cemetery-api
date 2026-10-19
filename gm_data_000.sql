@@ -147,7 +147,8 @@ CREATE TABLE `menu` (
   `zh_CN` varchar(80) NOT NULL DEFAULT '',
   `en_US` varchar(80) NOT NULL DEFAULT '' COMMENT '修改日期',
   PRIMARY KEY (`id`) USING BTREE,
-  KEY `pk_id_gm_accout` (`id`) USING BTREE
+  KEY `pk_id_gm_accout` (`id`) USING BTREE,
+  KEY `idx_menu_name` (`name`) USING BTREE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
 
 -- ----------------------------
@@ -203,7 +204,8 @@ CREATE TABLE `operator` (
   `isMaintenance` smallint(1) unsigned zerofill DEFAULT '0' COMMENT '是否运维',
   `termYears` varchar(255) DEFAULT '' COMMENT 'termYears',
   PRIMARY KEY (`idOperator`) USING BTREE,
-  KEY `pk_id_gm_accout` (`idOperator`) USING BTREE
+  KEY `pk_id_gm_accout` (`idOperator`) USING BTREE,
+  KEY `idx_operator_phone` (`phone`) USING BTREE
 ) ENGINE=InnoDB AUTO_INCREMENT=1000 DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
 
 -- ----------------------------
@@ -226,7 +228,8 @@ CREATE TABLE `operator_power` (
   `useExamine` smallint(6) DEFAULT '0' COMMENT '核对',
   `useFinish` smallint(6) DEFAULT '0' COMMENT '完成',
   `usePower` smallint(6) DEFAULT '0' COMMENT '权限',
-  PRIMARY KEY (`idPower`) USING BTREE
+  PRIMARY KEY (`idPower`) USING BTREE,
+  KEY `idx_operator_power` (`idOperator`, `idMenu`, `useMenu`) USING BTREE
 ) ENGINE=InnoDB AUTO_INCREMENT=200000 DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
 
 -- ----------------------------
@@ -301,6 +304,8 @@ CREATE TABLE `park` (
 -- ----------------------------
 -- Table structure for room
 -- ----------------------------
+-- 20261019 性能优化: 业务表补二级索引,覆盖 idRoom 子表联查/区域卡片列表/编号查重/日期统计等高频过滤列;
+-- 线上老库不重建,执行 npm run db:indexes (scripts/add-indexes.js) 幂等补齐
 DROP TABLE IF EXISTS `room`;
 CREATE TABLE `room` (
   `idRoom` bigint(20) NOT NULL AUTO_INCREMENT COMMENT 'ID房间',
@@ -329,7 +334,10 @@ CREATE TABLE `room` (
   `transferOutStatus` varchar(100) DEFAULT NULL COMMENT '迁出状态',
   `remark` varchar(50) DEFAULT NULL COMMENT '备注',
   `reservationExpireDate` datetime DEFAULT NULL COMMENT '预定限期',
-  PRIMARY KEY (`idRoom`) USING BTREE
+  PRIMARY KEY (`idRoom`) USING BTREE,
+  KEY `idx_room_region_park` (`region`, `park`) USING BTREE,
+  KEY `idx_room_serial` (`region`, `serialNo`) USING BTREE,
+  KEY `idx_room_endDate` (`endDate`) USING BTREE
 ) ENGINE=InnoDB AUTO_INCREMENT=1000000 DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
 
 -- ----------------------------
@@ -350,7 +358,9 @@ CREATE TABLE `sale` (
   `createDate` datetime DEFAULT NULL COMMENT '创建日期',
   `modifyDate` datetime DEFAULT NULL COMMENT '修改日期',
   `isDeleted` smallint(1) unsigned zerofill NOT NULL DEFAULT '0' COMMENT '是否删除',
-  PRIMARY KEY (`idSale`) USING BTREE
+  PRIMARY KEY (`idSale`) USING BTREE,
+  KEY `idx_sale_idRoom` (`idRoom`, `isDeleted`) USING BTREE,
+  KEY `idx_sale_createDate` (`createDate`) USING BTREE
 ) ENGINE=InnoDB AUTO_INCREMENT=2000000 DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
 
 
@@ -374,7 +384,9 @@ CREATE TABLE `adminfee` (
   `createDate` datetime DEFAULT NULL COMMENT '创建日期',
   `modifyDate` datetime DEFAULT NULL COMMENT '修改日期',
   `isDeleted` smallint(1) unsigned zerofill DEFAULT '0' COMMENT '是否删除',
-  PRIMARY KEY (`idAdminfee`) USING BTREE
+  PRIMARY KEY (`idAdminfee`) USING BTREE,
+  KEY `idx_adminfee_idRoom` (`idRoom`, `isDeleted`, `createDate`) USING BTREE,
+  KEY `idx_adminfee_createDate` (`createDate`) USING BTREE
 ) ENGINE=InnoDB AUTO_INCREMENT=4000000 DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
 
 -- ----------------------------
@@ -397,7 +409,9 @@ CREATE TABLE `buried` (
   `modifyDate` datetime DEFAULT NULL COMMENT '修改日期',
   `createDate` datetime DEFAULT NULL COMMENT '创建日期',
   `isDeleted` smallint(1) unsigned zerofill DEFAULT '0' COMMENT '是否删除',
-  PRIMARY KEY (`idBuried`) USING BTREE
+  PRIMARY KEY (`idBuried`) USING BTREE,
+  KEY `idx_buried_idRoom` (`idRoom`, `isDeleted`) USING BTREE,
+  KEY `idx_buried_burialDate` (`burialDate`) USING BTREE
 ) ENGINE=InnoDB AUTO_INCREMENT=3000000 DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
 
 -- ----------------------------
@@ -415,7 +429,8 @@ CREATE TABLE `contacts` (
   `operator` varchar(40) DEFAULT '' COMMENT '操作人名',
   `modifyDate` datetime DEFAULT NULL COMMENT '修改日期',
   `createDate` datetime DEFAULT NULL COMMENT '创建日期',
-  PRIMARY KEY (`idContacts`) USING BTREE
+  PRIMARY KEY (`idContacts`) USING BTREE,
+  KEY `idx_contacts_idRoom` (`idRoom`, `isDeleted`) USING BTREE
 ) ENGINE=InnoDB AUTO_INCREMENT=5000000 DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
 
 
@@ -433,7 +448,8 @@ CREATE TABLE `period_change` (
   `modifyDate` datetime DEFAULT NULL COMMENT '修改日期',
   `createDate` datetime DEFAULT NULL COMMENT '创建日期',
   `reason` varchar(100) DEFAULT NULL COMMENT '原因',
-  PRIMARY KEY (`idChange`) USING BTREE
+  PRIMARY KEY (`idChange`) USING BTREE,
+  KEY `idx_period_change_idRoom` (`idRoom`, `isDeleted`) USING BTREE
 ) ENGINE=InnoDB AUTO_INCREMENT=6000000 DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
 
 -- ----------------------------
@@ -461,7 +477,8 @@ CREATE TABLE `burial_cert` (
   `createDate` datetime DEFAULT NULL COMMENT '创建日期',
   `modifyDate` datetime DEFAULT NULL COMMENT '修改日期',
   `equalDivision` smallint(1) DEFAULT NULL COMMENT '等分',
-  PRIMARY KEY (`idCert`) USING BTREE
+  PRIMARY KEY (`idCert`) USING BTREE,
+  KEY `idx_burial_cert_idRoom` (`idRoom`, `isDeleted`) USING BTREE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
 
 -- ----------------------------
@@ -508,7 +525,9 @@ CREATE TABLE `reserve` (
   `modifyDate` datetime NOT NULL COMMENT '修改日期',
   `createDate` datetime NOT NULL COMMENT '创建日期',
   `reservationExpireDate` datetime DEFAULT NULL COMMENT '预定限期',
-  PRIMARY KEY (`idReserve`) USING BTREE
+  PRIMARY KEY (`idReserve`) USING BTREE,
+  KEY `idx_reserve_idRoom` (`idRoom`, `isDeleted`) USING BTREE,
+  KEY `idx_reserve_expire` (`reservationExpireDate`) USING BTREE
 ) ENGINE=InnoDB AUTO_INCREMENT=7000000 DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
 
 -- ----------------------------
@@ -528,7 +547,8 @@ CREATE TABLE `transfer_out` (
   `operator` varchar(40) DEFAULT '' COMMENT '操作人名',
   `modifyDate` datetime DEFAULT NULL COMMENT '修改日期',
   `createDate` datetime DEFAULT NULL COMMENT '创建日期',
-  PRIMARY KEY (`idTransfer`) USING BTREE
+  PRIMARY KEY (`idTransfer`) USING BTREE,
+  KEY `idx_transfer_out_idRoom` (`idRoom`, `isDeleted`) USING BTREE
 ) ENGINE=InnoDB AUTO_INCREMENT=8000000 DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
 
 -- ----------------------------

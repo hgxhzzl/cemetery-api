@@ -15,6 +15,32 @@ function requirePlatformAdmin(req, res, next) {
   return res.status(403).json({ error: '无权限:仅平台管理员可操作!' });
 }
 
+// 菜单权限命中查询单语句化:按 name 集合时 JOIN menu 表匹配,按 idMenu 直配时不经过 menu 表,
+// 一次 DB 往返完成 menu→operator_power→operator 链校验,替代旧两步查询(先查 menu 拿 id 再查权限) 20261019 性能优化,
+// 约束:menu name / idMenu 的过滤条件必须写在 WHERE 里排在 a.idOperator 之后,与下方 [userId, ...values] 的顺序一致
+async function queryMenuPowerHit(userId, values, byMenuName) {
+  const holes = values.map(() => '?').join(', ');
+  const sql =
+    'SELECT 1 FROM gm_data_000.operator_power a ' +
+    'JOIN gm_data_000.operator b ON a.idOperator = b.idOperator AND b.isDeleted = 0 ' +
+    (byMenuName ? 'JOIN gm_data_000.menu m ON m.id = a.idMenu ' : '') +
+    'WHERE a.idOperator = ? AND a.useMenu = 1 ' +
+    (byMenuName ? `AND m.name IN (${holes})` : `AND a.idMenu IN (${holes})`);
+  // 位置绑定陷阱:mysql2 按占位符在 SQL 里的出现顺序消费参数数组,旧写法把 m.name IN (?) 放在上面的
+  // JOIN 段里,它早于 WHERE 的 a.idOperator = ?,结果菜单名被绑给 idOperator、userId 被绑给 m.name,
+  // 命中查询恒为空,所有非平台管理员账号按 name 的守卫一律 403“缺少该菜单操作权限” 20261019 修复,
+  const rows = await pool.query(sql, [userId, ...values]);
+  return Array.isArray(rows) && rows.length > 0;
+}
+
+// 拒绝路径存在性检查:仅在权限查询未命中时补打一次库,用于区分"菜单未配置"与"有菜单无权限"两种文案,
+// 放行路径(绝大多数请求)不触发 20261019 性能优化,
+async function anyMenuNameConfigured(menuNames) {
+  const holes = menuNames.map(() => '?').join(', ');
+  const rows = await pool.query(`SELECT 1 FROM gm_data_000.menu WHERE name IN (${holes})`, menuNames);
+  return Array.isArray(rows) && rows.length > 0;
+}
+
 // RBAC 中间件:校验当前操作员在指定菜单下具备菜单权限(useMenu=1);平台管理员全放行,
 // 业务规则:动作级字段(useCreate/useModify/useDelete)未启用,useMenu=1 即视为具备全部操作权限 20260918 修正,
 function requirePower(menuId) {
@@ -23,12 +49,8 @@ function requirePower(menuId) {
       return next();
     }
     try {
-      const sql =
-        'SELECT 1 FROM gm_data_000.operator_power a ' +
-        'JOIN gm_data_000.operator b ON a.idOperator = b.idOperator ' +
-        'WHERE b.idOperator = ? and b.isDeleted = 0 and a.idMenu = ? and a.useMenu = 1';
-      const rows = await pool.query(sql, [req.data.userId, menuId]);
-      if (Array.isArray(rows) && rows.length > 0) {
+      // 命中查询单语句化,口径与旧两步查询一致(b.isDeleted=0 + a.useMenu=1) 20261019 性能优化,
+      if (await queryMenuPowerHit(req.data.userId, [menuId], false)) {
         return next();
       }
       return res.status(403).json({ error: '无权限:当前账号缺少该菜单操作权限!' });
@@ -38,8 +60,9 @@ function requirePower(menuId) {
   };
 }
 
-// RBAC 按菜单 name 动态解析当前 idMenu 后校验:菜单 id 会因显示顺序调整而变化,代码不能写死 id;
-// 每次请求查 menu 表拿 id(菜单表极小,开销可忽略),name 缺失视为配置错误拒绝访问 20260919 动态化,
+// RBAC 按菜单 name 动态解析权限:菜单 id 会因显示顺序调整而变化,代码不能写死 id;
+// 旧实现每次请求先查 menu 表拿 id 再查 operator_power(2 次往返),现合并为一条 JOIN 只打 1 次库,
+// 菜单表极小且 name 已有索引,拒绝路径才补一次存在性检查以保留"菜单未配置"文案区分 20261019 性能优化,
 // openPaths(可选):挂载前缀下的子路径白名单,命中则仅需登录不校验菜单权限。适用于区域/园区下拉这类
 // 被多个业务页/查询页共用的参照数据:它们不能要求调用者具备“园区设置”菜单,否则未开该菜单的操作员会 403 使下拉空白 20261010 新增,
 function requirePowerByMenuName(menuName, openPaths) {
@@ -52,19 +75,12 @@ function requirePowerByMenuName(menuName, openPaths) {
       return next();
     }
     try {
-      const menuRows = await pool.query('SELECT id FROM gm_data_000.menu WHERE name = ?', [menuName]);
-      if (!Array.isArray(menuRows) || menuRows.length === 0) {
+      if (await queryMenuPowerHit(req.data.userId, [menuName], true)) {
+        return next();
+      }
+      if (!(await anyMenuNameConfigured([menuName]))) {
         console.error('[rbac] 菜单未配置,拒绝访问:', menuName);
         return res.status(403).json({ error: '无权限:菜单未配置!' });
-      }
-      const menuId = menuRows[0].id;
-      const sql =
-        'SELECT 1 FROM gm_data_000.operator_power a ' +
-        'JOIN gm_data_000.operator b ON a.idOperator = b.idOperator ' +
-        'WHERE b.idOperator = ? and b.isDeleted = 0 and a.idMenu = ? and a.useMenu = 1';
-      const rows = await pool.query(sql, [req.data.userId, menuId]);
-      if (Array.isArray(rows) && rows.length > 0) {
-        return next();
       }
       return res.status(403).json({ error: '无权限:当前账号缺少该菜单操作权限!' });
     } catch (error) {
@@ -82,23 +98,13 @@ function requirePowerByAnyMenuName(...menuNames) {
       return next();
     }
     try {
-      const placeholders = menuNames.map(() => '?').join(',');
-      const menuRows = await pool.query(
-        `SELECT id FROM gm_data_000.menu WHERE name IN (${placeholders})`,
-        menuNames,
-      );
-      const menuIds = Array.isArray(menuRows) ? menuRows.map((row) => row.id) : [];
-      if (menuIds.length === 0) {
+      // 任一菜单命中权限即放行:IN 一次性查全部 name,拒绝路径再按名单做存在性检查 20261019 性能优化,
+      if (await queryMenuPowerHit(req.data.userId, menuNames, true)) {
+        return next();
+      }
+      if (!(await anyMenuNameConfigured(menuNames))) {
         console.error('[rbac] 菜单未配置,拒绝访问:', menuNames.join('/'));
         return res.status(403).json({ error: '无权限:菜单未配置!' });
-      }
-      const sql =
-        'SELECT 1 FROM gm_data_000.operator_power a ' +
-        'JOIN gm_data_000.operator b ON a.idOperator = b.idOperator ' +
-        'WHERE b.idOperator = ? and b.isDeleted = 0 and a.idMenu IN (?) and a.useMenu = 1';
-      const rows = await pool.query(sql, [req.data.userId, menuIds]);
-      if (Array.isArray(rows) && rows.length > 0) {
-        return next();
       }
       return res.status(403).json({ error: '无权限:当前账号缺少该菜单操作权限!' });
     } catch (error) {

@@ -11,58 +11,8 @@ module.exports = router;
 // type=remark 直接更新 room.remark(墓位备注,仅本列不联动),
 // 默认落 graveplotbusiness 本业务表 20260923 修改 20260927 修改 20261002 修改,
 
-// 构建联系人同步语句:同墓位活动联系人按 名/电话 匹配,联系人名/电话/身份证号一并同步
-// (复制自下葬页逻辑,代码独立;同名存在且电话/身份证号有变化则更新;同名不存在但同电话存在则更新联系人名与身份证号;
-// 名/电话均不存在则新增;联系人名为空不处理) 20260923 新增,
-async function buildContactsSyncStatements(dataBase, idRoom, contactsName, contactsPhone, contactsIDCard, operator) {
-  const nameValid = contactsName !== undefined && contactsName !== null && String(contactsName).trim() !== '';
-  if (!nameValid) {
-    return [];
-  }
-
-  const name = String(contactsName).trim();
-  const phone = String(contactsPhone === undefined || contactsPhone === null ? '' : contactsPhone).trim();
-  const idCard = String(contactsIDCard === undefined || contactsIDCard === null ? '' : contactsIDCard).trim();
-  const table = dataBase + '.contacts';
-  const rows = await pool.query(
-    `select idContacts, contacts, contactsPhone, contactsIDCard from ${table} where idRoom = ? and isDeleted = 0`,
-    [idRoom],
-  );
-
-  const sameName = rows.find((item) => String(item.contacts || '').trim() === name);
-  if (sameName) {
-    if (String(sameName.contactsPhone || '').trim() !== phone || String(sameName.contactsIDCard || '').trim() !== idCard) {
-      return [public.getUpdateByConditionStatement({
-        table,
-        condition: { sql: 'idContacts = ? AND isDeleted = 0', params: [sameName.idContacts] },
-        contactsPhone: phone,
-        contactsIDCard: idCard,
-        operator,
-      })];
-    }
-    return [];
-  }
-
-  const samePhone = phone !== '' ? rows.find((item) => String(item.contactsPhone || '').trim() === phone) : null;
-  if (samePhone) {
-    return [public.getUpdateByConditionStatement({
-      table,
-      condition: { sql: 'idContacts = ? AND isDeleted = 0', params: [samePhone.idContacts] },
-      contacts: name,
-      contactsIDCard: idCard,
-      operator,
-    })];
-  }
-
-  return [public.getInsertStatement({
-    table,
-    idRoom,
-    contacts: name,
-    contactsPhone: phone,
-    contactsIDCard: idCard,
-    operator,
-  })];
-}
+// 联系人同步口径统一复用 public.buildContactsSyncStatements(与下葬/收管理费页同源),
+// 旧本地副本与其逐行同构,已删除避免双处维护产生偏差 20261019 重复代码消除,
 
 // 下葬形态通用:清理非 buried 表字段(前端统一业务模型按形态在后端拆分) 20260923 新增,
 function stripBuriedBody(req) {
@@ -351,7 +301,7 @@ router.post('/insert', async (req, res) => {
     sqlList.push(public.getRoomDeceasedSyncSql(req.data.dataBase, idRoom));
 
     try {
-      const contactsStatements = await buildContactsSyncStatements(
+      const contactsStatements = await public.buildContactsSyncStatements(
         req.data.dataBase, idRoom, contactsName, contactsPhone, contactsIDCard, req.data.userName,
       );
       if (contactsStatements.length > 0) {
@@ -696,7 +646,7 @@ router.post('/update', async (req, res) => {
     // 联系人同步 + 旧联系人清理(同下葬页修改) 20260923 新增,
     try {
       let contactsChanged = false;
-      const contactsStatements = await buildContactsSyncStatements(
+      const contactsStatements = await public.buildContactsSyncStatements(
         req.data.dataBase, idRoom, contactsName, contactsPhone, contactsIDCard, req.data.userName,
       );
       if (contactsStatements.length > 0) {

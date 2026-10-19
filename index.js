@@ -107,8 +107,6 @@ const accountPowerSaveROutes  = require('./accountPower/save')
 
 const app = express();
 
-process.env.appname = "GlobalVar";
-
 //token失效统一提示信息,中间件与错误处理共用,文案收敛到 public 避免硬编码 20260917 梳理,
 const TOKEN_EXPIRED_MESSAGE = public.TOKEN_EXPIRED_MESSAGE;
 
@@ -358,9 +356,6 @@ Promise.all([loginState.ensureTable(), device.ensureTable()]).then(() => {
     console.log(`Server is running on port ${config.app.port}`);
     // 敏感配置默认值告警:生产环境务必通过环境变量覆盖 20260917 新增,
     config.securityWarnings.forEach((warning) => console.warn('[security]', warning));
-    if (process.env.basicTime =="") {
-      console.log('Server basic data is null');
-    }
   });
 }).catch((error) => {
   console.error('[startup] login_session 建表失败,拒绝启动:', error.message);

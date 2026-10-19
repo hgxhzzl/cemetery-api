@@ -7,6 +7,7 @@
     "start": "node index.js",
     "dev": "node index.js",
     "db:init:mysql": "node scripts/init-mysql.js",
+    "db:indexes": "node scripts/add-indexes.js",
     "test": "node --test \"tests/*.test.js\"",
     "test:syntax": "node scripts/check-syntax.js",
     "smoke": "node scripts/smoke-test.js"
