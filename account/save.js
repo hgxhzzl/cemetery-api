@@ -3,6 +3,7 @@ const router = express.Router();
 const pool = require('../database');
 const public = require('../public');
 const rbac = require('../rbac');
+const loginState = require('../loginState');
 module.exports = router;
 
 // 全局管理接口:账户增删改与建库仅平台管理员可操作 20260917 越权收口,
@@ -12,8 +13,19 @@ router.post('/insert', async (req, res) => {
 
   public.normalizeBodyDates(req.body);
   const sqlList = [];
+  // 初始口令不再取手机号(登录名就是手机号,等于口令公开):提交值须过强度校验,缺省时服务端随机生成并一次性回显 20261021 审查修复 中E,
+  const submittedPassword = req.body.password === undefined || req.body.password === null ? '' : String(req.body.password);
+  let initialPassword = '';
+  if (submittedPassword !== '') {
+    const passwordError = public.validateSubmittedPassword(submittedPassword, req.body.phone);
+    if (passwordError) {
+      return res.status(400).json({ error: passwordError });
+    }
+  } else {
+    initialPassword = public.generateInitialPassword();
+  }
   // 初始密码统一哈希存储,不再明文落库 20260915 安全改造,
-  const accountPassword = await public.hashPassword(req.body.password || req.body.phone);
+  const accountPassword = await public.hashPassword(submittedPassword || initialPassword);
   let json ={};
   json.table ="gm_data_000.operator";
   json.phone = req.body.phone;
@@ -24,10 +36,8 @@ router.post('/insert', async (req, res) => {
   json.operator = req.data.userName;
   json.dataBaseName=req.body.dataBaseName;
 
-  // account 表同步存哈希密码,避免明文落库 20260915 安全改造,
-  if (req.body.password !== undefined) {
-    req.body.password = accountPassword;
-  }
+  // account 表同步存哈希密码,避免明文落库;无提交值时也要写入随机生成的哈希 20260915 安全改造, 20261021 审查修复 中E 调整,
+  req.body.password = accountPassword;
 
   // 参数化insert避免bcrypt哈希进入SQL文本被normalizeSql误替换 20260916 修复,
   let sqlOperator = public.getInsertStatement(json);
@@ -54,8 +64,9 @@ router.post('/insert', async (req, res) => {
   // 参数化insert避免bcrypt哈希进入SQL文本被normalizeSql误替换 20260916 修复,
   let sqlAccount = public.getInsertStatement(req.body);
   sqlList.push(sqlAccount);
-  
-  return public.Transaction(sqlList,res);
+
+  // 随机生成的初始口令仅在成功响应里回显一次(库中只存哈希,事后取不回) 20261021 审查修复 中E,
+  return public.Transaction(sqlList, res, initialPassword ? { data: { initialPassword } } : {});
 });
 router.post('/update', async (req, res) => {
   public.normalizeBodyDates(req.body);
@@ -67,8 +78,10 @@ router.post('/update', async (req, res) => {
   const accountUpdate = { ...req.body };
   // 密码修改统一哈希存储,避免明文落库 20260915 安全改造,
   // 已是bcrypt哈希时跳过,防止二次哈希导致登录失效 20260916 修复,
+  let passwordUpdated = false;
   if (accountUpdate.password !== undefined && accountUpdate.password !== '' && !public.isBcryptHash(accountUpdate.password)) {
     accountUpdate.password = await public.hashPassword(accountUpdate.password);
+    passwordUpdated = true;
   }
   accountUpdate.table = "gm_data_000.account";
   accountUpdate.operator = req.data.userName;
@@ -77,6 +90,22 @@ router.post('/update', async (req, res) => {
   delete accountUpdate.idAccount;
   // 参数化update避免bcrypt哈希进入SQL文本被normalizeSql误替换 20260916 修复,
   const sqlList = [public.getUpdateByIdStatement(accountUpdate)];
+
+  // 账户口令被真正改动时作废它名下的活跃登录态:登录态以 operator.phone 为键,
+  // 改完密码不让旧 token 继续有效 20261021 审查修复 P0-3,
+  if (passwordUpdated && req.body.dataBaseName) {
+    try {
+      const phoneRows = await pool.query(
+        'SELECT phone FROM gm_data_000.operator WHERE dataBaseName = ? AND isAccount = 1',
+        [req.body.dataBaseName],
+      );
+      for (const row of phoneRows || []) {
+        await loginState.deleteActiveLogin(row.phone);
+      }
+    } catch (error) {
+      console.error('revoke login session failed:', error);
+    }
+  }
 
   if (req.body.dataBaseName) {
     const operatorUpdate = {

@@ -5,6 +5,7 @@ const express = require('express');
 const router = express.Router();
 const bublicfun = require('./public.js');
 const pool = require('./database.js');
+const rbac = require('./rbac.js');
 
 module.exports = { router, ensureTable, isDeviceAllowed, registerDevice, disableDevice };
 
@@ -50,9 +51,12 @@ async function disableDevice(deviceHash) {
   ]);
 }
 
-// 仅平台管理员(isAccount=1)可操作设备白名单:登记/停用是管理动作,普通操作员无权改动指定电脑范围
+// 仅平台管理员(isAccount=1)可操作设备白名单:登记/停用是管理动作,普通操作员无权改动指定电脑范围,
+// 口径统一收口到 rbac.isPlatformAdmin(审查修复 20261021 P1-1):原写法只判 isAccount=1,而该列存在于各租户库内,
+// 租户管理员同样为 isAccount=1,因而可跨租户往白名单里登记自己机器并解锁任意设备登录,
+// rbac 口径额外限定 dataBase=gm_data_000(仅平台总管库),与全站全局管理接口保持一致,
 function requireAdmin(req, res) {
-  if (Number(req.data?.isAccount) !== 1) {
+  if (!rbac.isPlatformAdmin(req)) {
     res.status(403).json({ code: 403, message: '仅平台管理员可操作设备白名单' });
     return false;
   }

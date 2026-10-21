@@ -6,9 +6,9 @@ module.exports = router;
 
 // 删除迁出:软删除选中的迁出记录(按 idTransfer);若该墓位已无其他活动迁出记录,
 // 则把墓位迁出状态回置为未迁出,事务保证两表一致 20260916 新增,
-router.get('/', async (req, res) => {
-  const idTransfer = public.parseNumericParam(req.query.idTransfer);
-  const idRoom = public.parseNumericParam(req.query.idRoom);
+router.post('/', async (req, res) => {
+  const idTransfer = public.parseNumericParam(public.readParam(req, 'idTransfer'));
+  const idRoom = public.parseNumericParam(public.readParam(req, 'idRoom'));
   if (idTransfer === null) {
     return res.status(400).json({ error: 'idTransfer参数错误!' });
   }
@@ -24,7 +24,7 @@ router.get('/', async (req, res) => {
     isDeleted: 1,
     operator: req.data.userName,
   };
-  const sqlTransfer = public.getUpdateByIdStatement(transferJson);
+  const sqlTransfer = public.getSoftDeleteByIdStatement(transferJson);
   const sqlList = [sqlTransfer];
 
   // 查询删除后该墓位是否仍有其他活动迁出记录,无则回置墓位为未迁出

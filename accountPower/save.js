@@ -21,6 +21,8 @@ router.post('/power', async (req, res) => {
 
   try {
     const results = await pool.query(sql, [req.body.dataBaseName, idMenu]);
+    // 账户菜单权限落库后作废守卫缓存,与新菜单树下发保持同一时刻生效(审查修复 20261021 P2 性能),
+    rbac.invalidateAuthCaches();
     return public.respondAffectedRows(res, results);
   } catch (error) {
     return public.handleQueryError(res, error);

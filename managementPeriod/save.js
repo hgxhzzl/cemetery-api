@@ -19,12 +19,12 @@ router.post('/update', async (req, res) => {
   const dataBase = req.data.dataBase;
 
   // 变更记录：idRoom/新旧结束日期/原因，operator 取当前登录操作人名，modifyDate/createDate 由公共函数自动填充 20260915 新增
+  // isDeleted 不再由入参写：新记录默认就是活动行，保留列交由语句构造器统一把守 20261021 审查修复 P0-2,
   const changeBody = {
     table: dataBase + '.period_change',
     idRoom: Number(idRoom),
     oldEndDate: req.body.oldEndDate || null,
     newEndDate,
-    isDeleted: 0,
     operator: req.data.userName,
     reason: String(req.body.reason || '').trim(),
   };

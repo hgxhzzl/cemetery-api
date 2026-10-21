@@ -2,138 +2,73 @@ const express = require('express');
 const cors = require('cors')
 
 //公用路径
-const userRoutes = require('./login');
-const menuROutes = require('./menu')
 const bodyParser = require('body-parser');
 const vertoken = require('./token');
-const expressJwt = require('express-jwt');
 const loginState = require('./loginState');
 const device = require('./device');
 const config = require('./config');
 const requestContext = require('./requestContext');
+const database = require('./database');
 const public = require('./public');
 const rbac = require('./rbac');
-
-//合同路径
-const contractDeleteROutes = require('./contract/delete')
-const contractQueryROutes  = require('./contract/query')
-const contractSaveROutes = require('./contract/save')
-
-//账户路径
-const accountDeleteROutes = require('./account/delete')
-const accountQueryROutes  = require('./account/query')
-const accountSaveROutes = require('./account/save')
-
-//标签路径
-const taginfoQueryROutes  = require('./taginfo/query')
-const taginfoSaveROutes  = require('./taginfo/save')
-
-//操作员路径
-const operatorDeleteROutes = require('./operator/delete')
-const operatorQueryROutes  = require('./operator/query')
-const operatorSaveROutes = require('./operator/save')
-
-//操作员权限路径
-const operatorPowerQueryROutes  = require('./operatorPower/query')
-const operatorPowerSaveROutes = require('./operatorPower/save')
-
-//园区路径
-const parkQueryROutes  = require('./park/query')
-const parkSaveROutes = require('./park/save')
-
-//收据配制路径
-const receiptConfigQueryROutes  = require('./receiptConfig/query')
-const receiptConfigSaveROutes = require('./receiptConfig/save')
-
-//卡片配色路径
-const cardColorQueryROutes  = require('./cardColor/query')
-const cardColorSaveROutes = require('./cardColor/save')
-
-//room路径
-const roomQueryROutes  = require('./room/query')
-const roomSaveROutes = require('./room/save')
-const roomDeleteROutes = require('./room/delete')
-
-//销售路径
-const saleSaveROutes = require('./sale/save')
-const saleDeleteROutes = require('./sale/delete')
-const saleQueryROutes = require('./sale/query')
-//销售统计查询路径
-const saleQueryStatsRoutes = require('./saleQuery/query')
-//墓位业务路径(菜单 103101 墓位业务,数据表 graveplotbusiness,独立于销售) 20260923 新增
-const gravePlotBusinessSaveROutes = require('./gravePlotBusiness/save')
-const gravePlotBusinessDeleteROutes = require('./gravePlotBusiness/delete')
-const gravePlotBusinessQueryROutes = require('./gravePlotBusiness/query')
-const gravePlotBusinessCancelSaleROutes = require("./gravePlotBusiness/cancelSale")
-const buriedQueryStatsRoutes = require('./buriedQuery/query')
-const adminfeeQueryStatsRoutes = require('./adminfeeQuery/query')
-const contactsQueryStatsRoutes = require('./contactsQuery/query')
-const roomQueryStatsRoutes = require('./roomQuery/query')
-//管理期限路径
-const managementPeriodRoutes = require('./managementPeriod/query')
-const managementPeriodSaveRoutes = require('./managementPeriod/save')
-
-
-//首页路径
-const dashboardQueryROutes  = require('./dashboard/query')
-
-//下葬路径
-const buriedQueryROutes  = require('./buried/query')
-const buriedSaveROutes = require('./buried/save')
-const buriedDeleteROutes = require('./buried/delete')
-const transferOutQueryROutes  = require('./transferOut/query')
-const transferOutSaveROutes = require('./transferOut/save')
-const transferOutDeleteROutes = require('./transferOut/delete')
-
-//管理费收款路径
-const adminfeeQueryROutes = require('./adminfee/query')
-const adminfeeSaveROutes = require('./adminfee/save')
-const adminfeeDeleteROutes = require('./adminfee/delete')
-
-//墓位联系人路径
-const contactsQueryROutes = require('./contacts/query')
-const contactsSaveROutes = require('./contacts/save')
-const contactsDeleteROutes = require('./contacts/delete')
-
-//预定路径
-const reserveSaveROutes = require('./reserve/save')
-const reserveQueryROutes = require('./reserve/query')
-const reserveDeleteROutes = require('./reserve/delete')
-
-//账户权限路径
-const accountPowerQueryROutes  = require('./accountPower/query')
-const accountPowerSaveROutes  = require('./accountPower/save')
-
+// 各业务路由的 require 与挂载已全部收进声明式注册表(审查修复 20261021 P1-4):
+// 原先本文件里“守卫挂载表 + 路由挂载表”两张手工清单共 90+ 行,顺序即安全但只能靠注释与人工纪律维持,
+// 现在新增接口只需在 routeRegistry.js 加一条条目,守卫与路由由 mountApiRoutes 按固定顺序统一挂载,
+const routeRegistry = require('./routeRegistry');
+const httpDefaults = require('./httpDefaults');
 
 const app = express();
 
-//token失效统一提示信息,中间件与错误处理共用,文案收敛到 public 避免硬编码 20260917 梳理,
-const TOKEN_EXPIRED_MESSAGE = public.TOKEN_EXPIRED_MESSAGE;
+// 全局兜底：Express 4 不捕获 async handler 抛出的 rejection，Node ≥15 默认策略直接崩进程；
+// 这里记录日志并尽量为尚未应答的请求补发 500（requestContext 在同一异步链上可取到 res），
+// 覆盖各路由 try 外的同步抛错路径（如语句构造 assertIdentifier） 20261021 审查修复②,
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason && reason.stack ? reason.stack : reason);
+  try {
+    const res = requestContext.getResponse();
+    if (res && !res.headersSent) {
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  } catch (e) {
+    // 补发失败仅记日志，避免兜底处理器自身抛错再次未捕获
+    console.error('[unhandledRejection] respond failed:', e.message);
+  }
+});
+
+// token 失效文案与统一 401 信封改由 public.respondUnauthorized 下发(审查修复 20261021 P1-5),
+// 本文件不再单独引用 TOKEN_EXPIRED_MESSAGE,
+
+// 安全响应头/请求日志/404 与终态错误信封均与业务无关,已抽到 httpDefaults.js 以便单测覆盖,
+// 安全头必须挂在最前面:请求体解析失败/404/500 等短路路径同样要带头(审查修复 20261021 P2),
+app.use(httpDefaults.securityHeaders);
 
 //路由
 app.get('/', (req, res) => {
   res.send('Hello, World!')
 });
-app.use(bodyParser.urlencoded({ extended: false }));
-app.use(bodyParser.json());
+
+// 请求体上限(审查修复 20261021 P2):原写法未设 limit,单个请求可塞任意大 JSON 在解析阶段就打满内存,
+// 超限由 body-parser 抛 entity.too.large 并由下方终态错误中间件统一回 413 JSON 信封,
+app.use(bodyParser.urlencoded({ extended: false, limit: config.app.bodyLimit }));
+app.use(bodyParser.json({ limit: config.app.bodyLimit }));
 app.use((req, res, next) => requestContext.runWithResponse(res, next));
+// 响应信封归一:必须在 body 解析之后、任何路由之前挂载,
+// 把历史手写 `json({ error })` / 缺 code 的响应体统一补齐为 `{code, message, ...}`(审查修复 20261021 P1-5),
+app.use(public.normalizeEnvelope);
 
 app.use(cors({
   origin: config.app.corsOrigin,
+  // 本系统不靠 Cookie 鉴权(身份完全在 Authorization 头里的 JWT),前端已去掉 withCredentials 20261021 审查修复 P2,
+  // credentials 保持 true 仅为兼容可能的存量调用方:浏览器规则要求 credentials:true 时 Origin 不得为 *,
+  // 因此 CORS_ORIGIN 必须始终为显式列表(config.js 已对 '*' 软告警),后续要收紧可直接改 false 而无需动前端,
   credentials: true
 }));
 
-// 请求日志中间件:记录方法/路径/状态码/耗时 20260915 新增,
-app.use(function(req, res, next) {
-  const start = Date.now();
-  res.on('finish', () => {
-    console.log(`${req.method} ${req.originalUrl} ${res.statusCode} ${Date.now() - start}ms`);
-  });
-  return next();
-});
+// 请求日志中间件:记录方法/路径/状态码/耗时,带时间戳且脱敏查询串(实现见 httpDefaults.js) 20260915 新增,20261021 P2 改造,
+app.use(httpDefaults.requestLog);
 
 // 解析token获取用户信息:仅负责将有效token负载注入 req.data 并校验活跃登录态;
-// 验签失败/过期/格式非法由认证层直接闭环 401,不再静默放行依赖下方 express-jwt 兑底 20260917 收口,
+// 验签失败/过期/格式非法由认证层直接闭环 401,不再静默放行依赖下方认证闸门兑底 20260917 收口,
 // 免认证路径直接放行:登录请求可能携带旧token(localStorage残留),不应被认证层误拒 20260917 修复,
 // 菜单接口仍须解析token注入 req.data(按用户权限过滤菜单),不在豁免之列 20260917 修复,
 app.use(async function (req, res, next) {
@@ -146,41 +81,47 @@ app.use(async function (req, res, next) {
   }
   // header 格式非法(非 "Bearer <token>")时直接拒绝 20260917 收口,
   if (typeof token !== 'string' || !/^Bearer \S+$/.test(token.trim())) {
-    return res.status(401).send(TOKEN_EXPIRED_MESSAGE);
+    return public.respondUnauthorized(res);
   }
   try {
     const data = await vertoken.verToken(token);
     req.data = data;
   } catch (error) {
-    // 验签失败/token过期由认证层直接闭环,不再依赖下方 express-jwt 兑底 20260917 收口,
-    return res.status(401).send(TOKEN_EXPIRED_MESSAGE);
+    // 验签失败/token过期由认证层直接闭环,不再依赖下方认证闸门兜底 20260917 收口,
+    return public.respondUnauthorized(res);
   }
   // 校验活跃登录态:DB 查询失败按服务错误处理,避免误报为 token 失效 20260917 登录态DB化,
   try {
     const active = await loginState.hasActiveLogin(req.data.phone, req.data.exp);
     // 不存在活跃登录态(重新登录/登出后旧token)则结束
     if (!active) {
-      return res.status(401).send(TOKEN_EXPIRED_MESSAGE);
+      return public.respondUnauthorized(res);
     }
   } catch (error) {
     return public.handleQueryError(res, error);
   }
   return next();
 });
-  //验证token是否过期并规定哪些路由不用验证,
-  //地址一定要用双引号，单引号不好使
-  //path: [ "/api/login","/api/get-menu-list-i18n","/api/room-query/parkTree"]
-  app.use(expressJwt.expressjwt({
-  secret: config.auth.jwtSecret,algorithms: ["HS256"] })
-  .unless({
-  path: [ "/","/api/login","/api/get-menu-list-i18n"]
-  }));
-  //当token失效返回提示信息
+// 认证闸门:上方中间件已对携带 token 的请求做了唯一一次验签(算法在 token.js 固定为 HS256)并注入 req.data,
+// 本处只确认受保护请求都带着有效身份,不再用 express-jwt 对同一 token 二次验签 20261021 审查修复 低,
+// 免认证口径与原 express-jwt unless 一致:根路径/登录/菜单接口(菜单靠已解析身份过滤,未带 token 时走匿名分支),
+const AUTH_EXEMPT_PATHS = ['/', '/api/login', '/api/get-menu-list-i18n'];
+app.use(function (req, res, next) {
+  if (AUTH_EXEMPT_PATHS.includes(req.path)) {
+    return next();
+  }
+  if (!req.data) {
+    console.warn('auth 401:', 'no_valid_identity', req.method, public.maskRequestTarget(req.originalUrl));
+    return public.respondUnauthorized(res);
+  }
+  return next();
+});
+  //兜底错误处理:下游中间件/路由抛出的 401 统一转 token 失效提示,其余继续下传,
   app.use(function(err, req, res, next) {
 
   if (err.status == 401) {
-    console.log('auth 401:', err.code || 'unauthorized', req.method, req.originalUrl);
-    return res.status(401).send(TOKEN_EXPIRED_MESSAGE);
+    console.warn('auth 401:', err.code || 'unauthorized', req.method, public.maskRequestTarget(req.originalUrl));
+    return public.respondUnauthorized(res);
   }
 
   console.error('Unhandled middleware error:', err);
@@ -191,158 +132,17 @@ app.use(async function (req, res, next) {
 // 登录/设备/菜单等无 req.data 或无区域参数的路径不受影响(无名单即不注入不拦截) 20261010 新增,
 app.use(rbac.requireRegionScope);
 
-app.use('/api/login',userRoutes);
-//设备白名单接口(登记/列表/停用,仅平台管理员可操作,路由层已有token认证) 20260924 新增,
-app.use('/api/device',device.router);
-app.use('/api/get-menu-list-i18n',menuROutes);
+// 业务接口挂载:守卫(区域归属/菜单权限/仅平台管理员)与路由均由声明式注册表驱动,
+// 挂载前会先跑一轮注册表体检(auditRouteRegistry),任何接口未登记守卫则直接抛错拒绝启动,
+// 原先这里需要同时维护“守卫挂载表”与“路由挂载表”两张清单且靠注释保证守卫先注册 20261021 审查修复 P1-4,
+// 区域归属口径(详情读/修改/软删按主键直取直写时校验记录所属区域)已随各条目声明,
+// 名单为空(平台管理员/未配区域)或参数缺失时直接放行,不影响存量调用 20261021 审查修复④,
+routeRegistry.mountApiRoutes(app);
 
-//合同接口(菜单 101102 合同列表) 20260917 RBAC 接入,20260919 改按菜单 name 动态解析,
-app.use('/api/contract-save/insert', rbac.requirePowerByMenuName('contract'));
-app.use('/api/contract-save/update', rbac.requirePowerByMenuName('contract'));
-app.use('/api/contract-delete', rbac.requirePowerByMenuName('contract'));
-app.use('/api/contract-query', rbac.requirePowerByMenuName('contract'));
-app.use('/api/contract-delete',contractDeleteROutes);
-app.use('/api/contract-query',contractQueryROutes);
-app.use('/api/contract-save',contractSaveROutes);
-//账户接口
-app.use('/api/account-save',accountSaveROutes);
-app.use('/api/account-query',accountQueryROutes);
-app.use('/api/account-delete',accountDeleteROutes);
-//标签接口(菜单 102102 选择设置) 20260917 RBAC 接入,20260919 改按菜单 name 动态解析,
-// 同理 /taginfo 作为业务页参考数据(墓位业务页的“逝者关系”下拉)不要求“选择设置”菜单权限,
-// 否则未开该菜单的操作员表单里这个下拉会空;/tagset 仍属选择设置页自身功能,保持严格校验 20261010 修复,
-app.use('/api/taginfo-save/insert', rbac.requirePowerByMenuName('tagInfo'));
-app.use('/api/taginfo-query', rbac.requirePowerByMenuName('tagInfo', ['/taginfo']));
-app.use('/api/taginfo-query',taginfoQueryROutes);
-app.use('/api/taginfo-save',taginfoSaveROutes);
+app.use(httpDefaults.notFound);
 
-//操作员接口(菜单 102104 操作人员) 20260917 RBAC 接入,20260919 改按菜单 name 动态解析,
-app.use('/api/operator-save/insert', rbac.requirePowerByMenuName('operator'));
-app.use('/api/operator-save/update', rbac.requirePowerByMenuName('operator'));
-app.use('/api/operator-save/password', rbac.requirePowerByMenuName('operator'));
-app.use('/api/operator-save/power', rbac.requirePowerByMenuName('operator'));
-app.use('/api/operator-delete', rbac.requirePowerByMenuName('operator'));
-app.use('/api/operator-query', rbac.requirePowerByMenuName('operator'));
-app.use('/api/operator-save',operatorSaveROutes);
-app.use('/api/operator-query',operatorQueryROutes);
-app.use('/api/operator-delete',operatorDeleteROutes);
-//操作员权限接口(菜单 102104 操作人员) 20260919 改按菜单 name 动态解析,
-app.use('/api/operatorPower-save/power', rbac.requirePowerByMenuName('operator'));
-app.use('/api/operatorPower-query', rbac.requirePowerByMenuName('operator'));
-app.use('/api/operatorPower-save',operatorPowerSaveROutes);
-app.use('/api/operatorPower-query',operatorPowerQueryROutes);
-//园区接口(菜单 102103 园区设置) 20260919 改按菜单 name 动态解析,
-// 区域/园区下拉(/region /park)为各业务页与查询页共用的参照数据且已按 operator.region 收窄,
-// 不要求调用者具备“园区设置”菜单权限:13766891955 这类未开该菜单的操作员会 403,表现为区域下拉空白 20261010 修复,
-app.use('/api/park-save/insert', rbac.requirePowerByMenuName('park'));
-app.use('/api/park-query', rbac.requirePowerByMenuName('park', ['/region', '/park']));
-app.use('/api/park-save',parkSaveROutes);
-app.use('/api/park-query',parkQueryROutes);
-//收据配制接口(菜单 102105 收据配制) 20260922 新增,
-app.use('/api/receiptConfig-query', rbac.requirePowerByMenuName('receiptConfig'));
-app.use('/api/receiptConfig-save', rbac.requirePowerByMenuName('receiptConfig'));
-app.use('/api/receiptConfig-query',receiptConfigQueryROutes);
-//收据配制打印查询:打印票据读取前缀/地址/电话不属页面操作,仅需登录不校验菜单权限 20260922 新增,
-app.use('/api/receiptConfig-print',receiptConfigQueryROutes);
-app.use('/api/receiptConfig-save',receiptConfigSaveROutes);
-//卡片配色接口(菜单 name=cardColor 卡片颜色) 20261011 新增,
-// 查询不校验菜单权限:四态卡片色出现在墓位业务/墓位设置/管理费用/迁出等所有卡片页,未开"卡片颜色"菜单的操作员
-// 也应看到同事配好的色,权限只挡在保存上(与 /api/receiptConfig-print 只需登录同理);
-// 未建表时查询报错由前端 catch 回落 CSS 默认色,不影响进页 20261011 新增,
-app.use('/api/cardColor-query', cardColorQueryROutes);
-app.use('/api/cardColor-save', rbac.requirePowerByMenuName('cardColor'));
-app.use('/api/cardColor-save',cardColorSaveROutes);
-//room接口(菜单 name=room 墓位设置,按 name 动态解析 id,菜单 id 因排序调整变化时不需改代码 20260919 修复)
-app.use('/api/room-save/insert', rbac.requirePowerByMenuName('room'));
-app.use('/api/room-save/update', rbac.requirePowerByMenuName('room'));
-app.use('/api/room-delete', rbac.requirePowerByMenuName('room'));
-app.use('/api/room-query', rbac.requireQueryPowerWithDetail('room'));
-app.use('/api/room-save',roomSaveROutes);
-app.use('/api/room-query',roomQueryROutes);
-app.use('/api/room-delete',roomDeleteROutes);
-
-//销售接口(菜单 103102 墓位销售) 20260917 RBAC 接入,20260919 改按菜单 name 动态解析,
-app.use('/api/sale-save/insert', rbac.requirePowerByMenuName('sale'));
-app.use('/api/sale-save/update', rbac.requirePowerByMenuName('sale'));
-app.use('/api/sale-delete', rbac.requirePowerByMenuName('sale'));
-app.use('/api/sale-query', rbac.requireQueryPowerWithDetail('sale'));
-app.use('/api/sale-save',saleSaveROutes);
-app.use('/api/sale-delete',saleDeleteROutes);
-app.use('/api/sale-query',saleQueryROutes);
-//墓位业务接口(菜单 103101 墓位业务) 20260923 新增,
-app.use('/api/gravePlotBusiness-save/insert', rbac.requirePowerByMenuName('gravePlotBusiness'));
-app.use('/api/gravePlotBusiness-save/update', rbac.requirePowerByMenuName('gravePlotBusiness'));
-app.use('/api/gravePlotBusiness-delete', rbac.requirePowerByMenuName('gravePlotBusiness'));
-app.use('/api/gravePlotBusiness-query', rbac.requirePowerByMenuName('gravePlotBusiness'));
-app.use('/api/gravePlotBusiness-save',gravePlotBusinessSaveROutes);
-app.use('/api/gravePlotBusiness-delete',gravePlotBusinessDeleteROutes);
-app.use('/api/gravePlotBusiness-query',gravePlotBusinessQueryROutes);
-app.use('/api/gravePlotBusiness-cancelSale', rbac.requirePowerByMenuName('gravePlotBusiness'));
-app.use('/api/gravePlotBusiness-cancelSale',gravePlotBusinessCancelSaleROutes);
-//销售统计查询接口(菜单 105101/105102/105103/105104 查询统计) 20260919 改按菜单 name 动态解析,
-app.use('/api/saleQuery', rbac.requirePowerByMenuName('saleQuery'));
-app.use('/api/buriedQuery', rbac.requirePowerByMenuName('buriedQuery'));
-app.use('/api/adminfeeQuery', rbac.requirePowerByMenuName('adminfeeQuery'));
-app.use('/api/contactsQuery', rbac.requirePowerByMenuName('contactsQuery'));
-app.use('/api/saleQuery',saleQueryStatsRoutes);
-app.use('/api/buriedQuery',buriedQueryStatsRoutes);
-app.use('/api/adminfeeQuery',adminfeeQueryStatsRoutes);
-app.use('/api/contactsQuery',contactsQueryStatsRoutes);
-app.use('/api/roomQuery', rbac.requirePowerByMenuName('roomQuery'));
-app.use('/api/roomQuery', roomQueryStatsRoutes);
-//管理期限接口(菜单 104102 管理期限) 20260919 改按菜单 name 动态解析,
-app.use('/api/managementPeriod-save/update', rbac.requirePowerByMenuName('managementPeriod'));
-app.use('/api/managementPeriod', rbac.requirePowerByMenuName('managementPeriod'));
-app.use('/api/managementPeriod',managementPeriodRoutes);
-app.use('/api/managementPeriod-save',managementPeriodSaveRoutes);
-
-
-//下葬接口(菜单 103103 墓位下葬) 20260917 RBAC 接入,20260919 改按菜单 name 动态解析,
-app.use('/api/buried-save/insert', rbac.requirePowerByMenuName('buried'));
-app.use('/api/buried-save/update', rbac.requirePowerByMenuName('buried'));
-app.use('/api/buried-delete', rbac.requirePowerByMenuName('buried'));
-app.use('/api/buried-query', rbac.requireQueryPowerWithDetail('buried'));
-app.use('/api/buried-save',buriedSaveROutes);
-app.use('/api/buried-query',buriedQueryROutes);
-app.use('/api/buried-delete',buriedDeleteROutes);
-//迁出接口(菜单 103106 墓位迁出) 20260919 改按菜单 name 动态解析,
-app.use('/api/transferOut-save/insert', rbac.requirePowerByMenuName('transferOut'));
-app.use('/api/transferOut-save/update', rbac.requirePowerByMenuName('transferOut'));
-app.use('/api/transferOut-delete', rbac.requirePowerByMenuName('transferOut'));
-app.use('/api/transferOut-query', rbac.requirePowerByAnyMenuName('transferOut', 'transferOutQuery'));
-app.use('/api/transferOut-save',transferOutSaveROutes);
-app.use('/api/transferOut-query',transferOutQueryROutes);
-app.use('/api/transferOut-delete',transferOutDeleteROutes);
-//管理费收款接口(菜单 104101 管理收款) 20260919 改按菜单 name 动态解析,
-app.use('/api/adminfee-save/insert', rbac.requirePowerByMenuName('adminfee'));
-app.use('/api/adminfee-save/update', rbac.requirePowerByMenuName('adminfee'));
-app.use('/api/adminfee-delete', rbac.requirePowerByMenuName('adminfee'));
-app.use('/api/adminfee-query', rbac.requireQueryPowerWithDetail('adminfee'));
-app.use('/api/adminfee-save',adminfeeSaveROutes);
-app.use('/api/adminfee-query',adminfeeQueryROutes);
-app.use('/api/adminfee-delete',adminfeeDeleteROutes);
-//墓位联系人接口(菜单 103105 墓位联系) 20260919 改按菜单 name 动态解析,
-app.use('/api/contacts-save/insert', rbac.requirePowerByMenuName('contacts'));
-app.use('/api/contacts-save/update', rbac.requirePowerByMenuName('contacts'));
-app.use('/api/contacts-delete', rbac.requirePowerByMenuName('contacts'));
-app.use('/api/contacts-query', rbac.requireQueryPowerWithDetail('contacts'));
-app.use('/api/contacts-save',contactsSaveROutes);
-app.use('/api/contacts-query',contactsQueryROutes);
-app.use('/api/contacts-delete',contactsDeleteROutes);
-//预定接口(菜单 103104 墓位预定) 20260919 改按菜单 name 动态解析,
-app.use('/api/reserve-save/insert', rbac.requirePowerByMenuName('reserve'));
-app.use('/api/reserve-save/update', rbac.requirePowerByMenuName('reserve'));
-app.use('/api/reserve-delete', rbac.requirePowerByMenuName('reserve'));
-app.use('/api/reserve-query', rbac.requireQueryPowerWithDetail('reserve'));
-app.use('/api/reserve-save',reserveSaveROutes);
-app.use('/api/reserve-query',reserveQueryROutes);
-app.use('/api/reserve-delete',reserveDeleteROutes);
-//账户菜单
-app.use('/api/accountPower-query',accountPowerQueryROutes);
-app.use('/api/accountPower-save',accountPowerSaveROutes);
-//首页接口
-app.use('/api/dashboard-query',dashboardQueryROutes);
-
+// 终态错误中间件:统一回 JSON 信封并把堆栈留在日志(实现见 httpDefaults.js),
+app.use(httpDefaults.finalError);
 //启动服务器
 // 生产环境敏感配置缺失时拒绝启动 20260917 收口,
 if (config.securityFatal.length > 0) {
@@ -351,8 +151,9 @@ if (config.securityFatal.length > 0) {
 }
 
 // 启动前幂等建表:确保登录态表 login_session 存在,线上老库缺表曾导致登录 500 20260917 修复,
+let server = null;
 Promise.all([loginState.ensureTable(), device.ensureTable()]).then(() => {
-  app.listen(config.app.port, () => {
+  server = app.listen(config.app.port, () => {
     console.log(`Server is running on port ${config.app.port}`);
     // 敏感配置默认值告警:生产环境务必通过环境变量覆盖 20260917 新增,
     config.securityWarnings.forEach((warning) => console.warn('[security]', warning));
@@ -361,6 +162,41 @@ Promise.all([loginState.ensureTable(), device.ensureTable()]).then(() => {
   console.error('[startup] login_session 建表失败,拒绝启动:', error.message);
   process.exit(1);
 });
+
+// 优雅停机(审查修复 20261021 P2):原写法收到 SIGTERM/SIGINT 直接退出,连接池 pool.end() 从未被调用,
+// 在途的多语句事务(管理费链、批量建位)被硬切,容器重启/滚动发布时表现为偶发半提交数据;
+// 现先停止接收新连接并排空在途请求,再关池;超时未到则强制退出,避免 keep-alive 长连把进程吊死,
+function shutdown(signal) {
+  console.log(`[${new Date().toISOString()}] ${signal} received, shutting down...`);
+  const force = setTimeout(() => {
+    console.error('[shutdown] 超出优雅停机窗口,强制退出');
+    process.exit(1);
+  }, config.app.shutdownTimeoutMs);
+  // unref 使正常排空后不会被这个定时器拖住退出,
+  force.unref();
+
+  if (!server) {
+    clearTimeout(force);
+    process.exit(0);
+    return;
+  }
+
+  server.close(async () => {
+    clearTimeout(force);
+    try {
+      await database.end();
+    } catch (error) {
+      console.error('[shutdown] 连接池关闭失败:', error.message);
+    }
+    process.exit(0);
+  });
+  // 先掉空闲 keep-alive 连接,否则 server.close 会等它们自然超时,
+  if (typeof server.closeIdleConnections === 'function') {
+    server.closeIdleConnections();
+  }
+}
+
+['SIGTERM', 'SIGINT'].forEach((signal) => process.once(signal, () => shutdown(signal)));
 
 
 

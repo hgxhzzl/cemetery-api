@@ -4,8 +4,8 @@ const pool = require('../database');
 const public = require('../public');
 module.exports = router;
 
-router.get('/', async (req, res) => {
-  const idContract = public.parseNumericParam(req.query.idContract);
+router.post('/', async (req, res) => {
+  const idContract = public.parseNumericParam(public.readParam(req, 'idContract'));
   if (idContract === null) {
     return res.status(400).json({ error: 'idContract参数错误!' });
   }

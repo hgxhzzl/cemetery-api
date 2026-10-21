@@ -9,8 +9,8 @@ module.exports = router;
 router.use(rbac.requirePlatformAdmin);
 
 // 账户删除:事务内物理删除 account、该租户全部 operator、account_power、operator_power 四表记录 20260916 修改,20261004 调整为按 dataBaseName 删除全部操作员,
-router.get('/', async (req, res) => {
-  const idAccount = public.parseNumericParam(req.query.idAccount);
+router.post('/', async (req, res) => {
+  const idAccount = public.parseNumericParam(public.readParam(req, 'idAccount'));
   if (idAccount === null) {
     return res.status(400).json({ error: 'idAccount参数错误!' });
   }

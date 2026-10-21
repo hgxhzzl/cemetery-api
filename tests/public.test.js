@@ -51,7 +51,7 @@ test('getUpdateByConditionStatement: 条件参数化拼接,值不内联进SQL', 
     isDeleted: 1,
     operator: 'admin',
   };
-  const statement = public.getUpdateByConditionStatement(json);
+  const statement = public.getSoftDeleteByConditionStatement(json);
   assert.match(statement.sql, /where idRoom = \? AND isDeleted = 0$/);
   assert.ok(!statement.sql.includes("'1000001'"));
   // params = SET字段值(isDeleted/operator/modifyDate) + 条件参数
@@ -111,5 +111,94 @@ test('getRoomContactsSyncSql/getRoomDeceasedSyncSql: 聚合 SQL 生成', () => {
   assert.ok(deceasedSql.includes(', 100)'));
   assert.ok(deceasedSql.includes('where b.idRoom = 1000001'));
   assert.ok(deceasedSql.includes('and b.isDeleted = 0'));
+});
+
+// 保留列集中防护(审查修复 20261021 P0-2):写口把 req.body 直接当列集合使用,
+// 因此任何身份/租户/审计/主键列都不得由入参流入 SET/VALUES
+test('保留列防护:更新语句剔除 isDeleted/isAccount/dataBaseName/uuid/createDate 与主键列', () => {
+  const dirty = {
+    table: 'gm_data_000.room',
+    idfield: 'idRoom',
+    idvalue: '1000001',
+    price: 6666,
+    operator: 'admin',
+    // 以下均为攻击性入参,全部应被剔除
+    isDeleted: 1,
+    isAccount: 1,
+    dataBaseName: 'gm_data_999',
+    uuid: 'evil',
+    createDate: '2000-01-01 00:00:00',
+    idRoom: 999999,
+  };
+  const statement = public.getUpdateByIdStatement(dirty);
+  assert.ok(!statement.sql.includes('isDeleted'), 'SET 不应包含 isDeleted');
+  assert.ok(!statement.sql.includes('isAccount'), 'SET 不应包含 isAccount');
+  assert.ok(!statement.sql.includes('dataBaseName'), 'SET 不应包含 dataBaseName');
+  assert.ok(!statement.sql.includes('uuid'), 'SET 不应包含 uuid');
+  assert.ok(!statement.sql.includes('createDate'), 'SET 不应包含 createDate');
+  // SET 子句里不得出现主键列(只在 WHERE 中出现一次)
+  assert.strictEqual(statement.sql.split('idRoom').length - 1, 1);
+  // 存活列:price/operator/modifyDate + 末尾 idvalue
+  assert.strictEqual(statement.params.length, 4);
+  assert.strictEqual(statement.params[3], '1000001');
+  // 原入参对象不得被就地修改(浅拷贝口径 20260917)
+  assert.strictEqual(dirty.isDeleted, 1);
+});
+
+test('保留列防护:条件更新与新建同样剔除保留列,仅软删构造器放行 isDeleted', () => {
+  const conditionStatement = public.getUpdateByConditionStatement({
+    table: 'gm_data_000.sale',
+    condition: { sql: 'idRoom = ? AND isDeleted = 0', params: ['1000001'] },
+    isDeleted: 1,
+    isAccount: 1,
+    operator: 'admin',
+  });
+  assert.ok(!conditionStatement.sql.includes('set isDeleted'), '条件更新 SET 不应包含 isDeleted');
+  assert.ok(!conditionStatement.sql.includes('isAccount'), '条件更新 SET 不应包含 isAccount');
+  // 条件更新也统一刷 modifyDate(与按主键更新口径一致)
+  assert.match(conditionStatement.sql, /modifyDate/);
+
+  const softDelete = public.getSoftDeleteByConditionStatement({
+    table: 'gm_data_000.sale',
+    condition: { sql: 'idRoom = ? AND isDeleted = 0', params: ['1000001'] },
+    isDeleted: 1,
+    operator: 'admin',
+  });
+  assert.match(softDelete.sql, /set isDeleted/, '软删构造器应显式写入 isDeleted');
+
+  const insertStatement = public.getInsertStatement({
+    table: 'gm_data_000.contacts',
+    contacts: '张三',
+    isDeleted: 1,
+  });
+  assert.ok(!insertStatement.sql.includes('isDeleted'), 'INSERT 列不应包含 isDeleted');
+  // 建户路径合法写 isAccount/account 的 dataBaseName,INSERT 不拦这两个列(仅 UPDATE 拦)
+  const accountInsert = public.getInsertStatement({
+    table: 'gm_data_000.operator',
+    phone: '13800138000',
+    isAccount: 1,
+    dataBaseName: 'gm_data_001',
+  });
+  assert.match(accountInsert.sql, /isAccount/, '建户 INSERT 应保留 isAccount');
+  assert.match(accountInsert.sql, /dataBaseName/, '建户 INSERT 应保留 dataBaseName');
+});
+
+// 请求日志脱敏(审查修复 20261021 P2):日志里的手机号/账户名一旦落盘,留存期远超业务数据本身,
+test('maskRequestTarget: 敏感参数与手机号形态的值都被脱敏', () => {
+  assert.strictEqual(public.maskRequestTarget('/api/room-query/list'), '/api/room-query/list');
+  assert.strictEqual(public.maskRequestTarget('/api/room-query/list?phone=13800138000&pageNum=1'), '/api/room-query/list?phone=138****8000&pageNum=1');
+  // 参数名命中敏感词但值不是手机号形态:整值打码(账户名/联系人姓名直接走 query 传给后端),
+  assert.strictEqual(public.maskRequestTarget('/api/contract-query/list?accountName=%E5%BC%A0%E4%B8%89&idRoom=1000001'), '/api/contract-query/list?accountName=***&idRoom=1000001');
+  assert.strictEqual(public.maskRequestTarget('/api/login/13800138000'), '/api/login/138****8000');
+  // 空查询串与无值参数不应被改写成 "?" 尾巴,
+  assert.strictEqual(public.maskRequestTarget('/api/x?'), '/api/x');
+  assert.strictEqual(public.maskRequestTarget('/api/x?flag'), '/api/x?flag');
+  assert.strictEqual(public.maskRequestTarget(''), '');
+});
+
+test('maskQueryValue: 只按值形态与参数名判定,不误伤普通数值参数', () => {
+  assert.strictEqual(public.maskQueryValue('idRoom', '1000001'), '1000001');
+  assert.strictEqual(public.maskQueryValue('password', 'plain-text'), '***');
+  assert.strictEqual(public.maskQueryValue('orderBy', '12123456789'), '121****6789');
 });
 

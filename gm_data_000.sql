@@ -334,10 +334,15 @@ CREATE TABLE `room` (
   `transferOutStatus` varchar(100) DEFAULT NULL COMMENT '迁出状态',
   `remark` varchar(50) DEFAULT NULL COMMENT '备注',
   `reservationExpireDate` datetime DEFAULT NULL COMMENT '预定限期',
+  `serialNoKey` varchar(40) GENERATED ALWAYS AS (nullif(`serialNo`, '')) VIRTUAL COMMENT '区内编号唯一约束载体(空编号为NULL不参与唯一)',
+  `coordKey` varchar(80) GENERATED ALWAYS AS (case when (`isDeleted` = 0) and ((`transferOutStatus` is null) or (`transferOutStatus` <> _utf8mb4'statusType.transferOutStatusEnum.out')) then concat(`region`, _utf8mb4'|', `park`, _utf8mb4'|', `yNum`, _utf8mb4'|', `xNum`) else NULL end) VIRTUAL COMMENT '活动墓位坐标唯一约束载体(已删/已迁出为NULL不参与唯一)',
   PRIMARY KEY (`idRoom`) USING BTREE,
   KEY `idx_room_region_park` (`region`, `park`) USING BTREE,
+  KEY `idx_room_coord` (`region`, `park`, `yNum`, `xNum`) USING BTREE,
   KEY `idx_room_serial` (`region`, `serialNo`) USING BTREE,
-  KEY `idx_room_endDate` (`endDate`) USING BTREE
+  KEY `idx_room_endDate` (`endDate`) USING BTREE,
+  UNIQUE KEY `uk_room_region_serial` (`region`, `serialNoKey`) USING BTREE,
+  UNIQUE KEY `uk_room_coord` (`coordKey`) USING BTREE
 ) ENGINE=InnoDB AUTO_INCREMENT=1000000 DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
 
 -- ----------------------------

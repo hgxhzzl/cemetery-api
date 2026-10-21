@@ -5,8 +5,8 @@ const public = require('../public');
 const rbac = require('../rbac');
 module.exports = router;
 
-router.get('/', async (req, res) => {
-  const idOperator = public.parseNumericParam(req.query.idOperator);
+router.post('/', async (req, res) => {
+  const idOperator = public.parseNumericParam(public.readParam(req, 'idOperator'));
   if (idOperator === null) {
     return res.status(400).json({ error: 'idOperator参数错误!' });
   }
@@ -35,6 +35,8 @@ router.get('/', async (req, res) => {
       }
     }
     const results = await pool.query(statement.sql, statement.params);
+    // 操作员软删后作废守卫缓存,否则 30s TTL 内其旧权限命中结果仍可驱动业务接口(审查修复 20261021 P2 性能),
+    rbac.invalidateAuthCaches();
     return public.respondAffectedRows(res, results);
   } catch (error) {
     return public.handleQueryError(res, error);

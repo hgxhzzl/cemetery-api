@@ -4,8 +4,8 @@ const pool = require('../database');
 const public = require('../public');
 module.exports = router;
 
-router.get('/', async (req, res) => {
-  const idRoom = public.parseNumericParam(req.query.idRoom);
+router.post('/', async (req, res) => {
+  const idRoom = public.parseNumericParam(public.readParam(req, 'idRoom'));
   if (idRoom === null) {
     return res.status(400).json({ error: 'idRoom参数错误!' });
   }

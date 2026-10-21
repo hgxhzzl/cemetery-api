@@ -20,7 +20,8 @@ router.post('/insert', async (req, res) => {
 
   req.body.table = req.data.dataBase + '.sale';
   req.body.operator = req.data.userName;
-  let price = req.body.realPrice.toString();
+  // 守卫化取值：原 req.body.realPrice.toString() 在缺字段时抛 TypeError，async handler 内无人接住会崩进程（审查修复 20261021 ②）
+  let price = String(req.body.realPrice ?? '');
   price = price.replace(/,/g, '');
   req.body.realPrice = price;
   delete req.body.realPriceString;
@@ -64,7 +65,8 @@ router.post('/insert', async (req, res) => {
     sqlList.push(public.getRoomContactsSyncSql(req.data.dataBase, idRoom));
   }
 
-  return public.Transaction(sqlList, res);
+  // 销售新建落 room.serialNo:走撞号兜底事务(库层 uk_room_region_serial 兼 TOCTOU,审查修复 20261021 中B)
+  return public.TransactionWithSerialGuard(sqlList, res);
 });
 
 // 修改销售:更新销售记录 + 同步对应联系人,事务一致 20260909 修改,
@@ -138,7 +140,8 @@ router.post('/update', async (req, res) => {
       sqlList.push(public.getUpdateByConditionStatement(roomJson));
     }
 
-    return public.Transaction(sqlList, res);
+    // 销售更新落 room.serialNo:走撞号兜底事务(同新建,审查修复 20261021 中B)
+    return public.TransactionWithSerialGuard(sqlList, res);
   } catch (error) {
     return public.handleQueryError(res, error);
   }

@@ -3,6 +3,7 @@ const router = express.Router();
 const bublicfun = require('./public.js');
 const getToken = require('./token.js');
 const loginState = require('./loginState');
+const loginRateLimit = require('./loginRateLimit');
 const device = require('./device');
 const config = require('./config');
 // 创建 MySQL 连接池
@@ -12,22 +13,56 @@ module.exports = router;
 // 用户登录:promise链展平为纯async,错误统一由catch兜底 20260917 风格统一,
 router.post('/', async (req, res) => {
   const phone = req.body.username;
-  const password = req.body.password; 
+  const password = req.body.password;
+  // 可选园区限定:同一手机号在不同租户各有一条操作员时,客户端可携 dataBaseName 指定登录到哪个园区 20261021 审查修复 P0-4,
+  const loginDataBaseName = String(req.body.dataBaseName || '').trim();
+  // 爆破防护入口拦截:窗口内失败超限的手机号临时锁定,返回 429 并提示剩余秒数（审查修复 20261021 中A）,
+  if (config.loginRateLimit.enabled) {
+    const lockKey = loginRateLimit.normalizeKey(phone);
+    if (lockKey && loginRateLimit.isLocked(lockKey)) {
+      return res.status(429).json({
+        code: 429,
+        message: `尝试次数过多，请 ${loginRateLimit.getLockRemainingSeconds(lockKey)} 秒后再试`,
+      });
+    }
+  }
   try {
     // 检查用户名是否存在
-    const results = await pool.query('SELECT a.idOperator as userid,a.name as username,a.phone as phone,b.endDate as endDate,'+
+    let loginSql = 'SELECT a.idOperator as userid,a.name as username,a.phone as phone,b.endDate as endDate,'+
       'b.dataBaseName as dataBaseName,b.account as accountName,a.isAccount as isAccount,a.password as password,a.termYears as termYears '+
       'FROM gm_data_000.operator a,gm_data_000.account b '+
-      'WHERE a.dataBaseName = b.dataBaseName and a.isDeleted = 0 and b.isDeleted = 0 and a.phone = ?', [phone]);
+      'WHERE a.dataBaseName = b.dataBaseName and a.isDeleted = 0 and b.isDeleted = 0 and a.phone = ?';
+    const loginParams = [phone];
+    if (loginDataBaseName) {
+      loginSql += ' and b.dataBaseName = ?';
+      loginParams.push(loginDataBaseName);
+    }
+    // 固定排序:同一手机号多条候选时不再取决于引擎返回顺序(结果不可预测 = 可能登进错误的租户) 20261021 审查修复 P0-4,
+    loginSql += ' ORDER BY b.dataBaseName';
+    const results = await pool.query(loginSql, loginParams);
     if (results.length === 0) {
       return res.status(401).json({ code: 401, message: 'Invalid username or password' });
+    }
+    // 一个手机号命中多个园区账号且未指定园区时直接拒绝:静默取第一条会造成跨租户误登 20261021 审查修复 P0-4,
+    if (results.length > 1 && !loginDataBaseName) {
+      return res.status(400).json({
+        code: 400,
+        message: `该手机号关联了 ${results.length} 个园区账号，请使用园区专属手机号登录，或联系平台管理员合并账号`,
+      });
     }
 
     const user = results[0];
     // 验证密码是否匹配:bcrypt哈希优先比对,兼容存量明文 20260915 安全改造,
     const valid = await bublicfun.verifyPassword(password, user.password);
     if (!valid) {
+      // 密码错记入失败计数;账号不存在不计数(避免探测账号存在性差异),口令错误才计入（审查修复 20261021 中A）,
+      if (config.loginRateLimit.enabled) {
+        loginRateLimit.recordFailure(loginRateLimit.normalizeKey(phone));
+      }
       return res.status(401).json({ code: 401, message: 'Invalid username or password' });
+    }
+    if (config.loginRateLimit.enabled) {
+      loginRateLimit.clearFailures(loginRateLimit.normalizeKey(phone));
     }
     // 存量明文密码校验通过后自动升级为bcrypt存储,升级失败不影响本次登录 20260915 安全改造,
     if (!bublicfun.isBcryptHash(user.password)) {

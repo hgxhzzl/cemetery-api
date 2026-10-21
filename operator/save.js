@@ -3,6 +3,7 @@ const router = express.Router();
 const pool = require('../database');
 const public = require('../public');
 const rbac = require('../rbac');
+const loginState = require('../loginState');
 module.exports = router;
 
 const allowedPowerFields = new Set([
@@ -15,13 +16,43 @@ const allowedPowerFields = new Set([
   'usePower',
 ]);
 
+// 修改操作员的可写列白名单:只收业务字段,body 里其余字段一律不落库 20261021 审查修复 中F,
+// (table/operator/idfield/idvalue 是语句构造元信息,不在此列但也不能被剔除)
+const allowedOperatorUpdateFields = new Set([
+  'name',
+  'phone',
+  'duties',
+  'team',
+  'useStatus',
+  'region',
+  'joinDate',
+  'isMaintenance',
+  'termYears',
+  'password',
+]);
+// 提权列:isAccount=1 就是平台管理员、dataBaseName 决定租户归属,只能由平台管理员修改 20261021 审查修复 中F,
+const privilegedOperatorFields = new Set(['isAccount', 'dataBaseName']);
+// 语句构造元信息:由本接口自己赋值,不参与白名单判定(createDate/modifyDate 不在此列,客户端提交一律剔除)
+const statementMetaFields = new Set(['table', 'operator', 'idfield', 'idvalue']);
+
 router.post('/insert', async (req, res) => {
   
   req.body.table = "gm_data_000.operator";
   req.body.operator = req.data.userName;
   req.body.dataBaseName = req.data.dataBase;
+  // 初始口令不再取手机号(登录名就是手机号,等于口令公开):提交值须过强度校验,缺省时服务端随机生成并一次性回显 20261021 审查修复 中E,
+  const submittedPassword = req.body.password === undefined || req.body.password === null ? '' : String(req.body.password);
+  let initialPassword = '';
+  if (submittedPassword !== '') {
+    const passwordError = public.validateSubmittedPassword(submittedPassword, req.body.phone);
+    if (passwordError) {
+      return res.status(400).json({ error: passwordError });
+    }
+  } else {
+    initialPassword = public.generateInitialPassword();
+  }
   // 初始密码统一哈希存储,不再明文落库 20260915 安全改造,
-  req.body.password = await public.hashPassword(req.body.phone);
+  req.body.password = await public.hashPassword(submittedPassword || initialPassword);
   req.body.isAccount = 0;
 
   delete req.body.idOperator;
@@ -36,7 +67,8 @@ router.post('/insert', async (req, res) => {
   const statement = public.getInsertStatement(req.body);
   try {
     const results = await pool.query(statement.sql, statement.params);
-    return public.respondAffectedRows(res, results);
+    // 随机生成的初始口令仅在成功响应里回显一次(库中只存哈希,事后取不回) 20261021 审查修复 中E,
+    return public.respondAffectedRows(res, results, initialPassword ? { data: { initialPassword } } : {});
   } catch (error) {
     return public.handleQueryError(res, error);
   }
@@ -48,22 +80,46 @@ router.post('/update', async (req, res) => {
   }
 
   // 目标操作员租户归属校验:非平台管理员仅可改本租户操作员;结果同时供 account 同步使用 20260917 越权收口,
+  // isAccount 一并取出:是否为账户操作员以库中事实为准,不信客户端提交值 20261021 审查修复 中F,
+  // phone 也取出:改密时需据此作废该操作员的活跃登录态 20261021 审查修复 P0-3,
   let targetDataBase = req.data.dataBase;
+  let targetIsAccount = false;
+  let targetPhone = '';
   try {
     const targetRows = await pool.query(
-      'SELECT dataBaseName FROM gm_data_000.operator WHERE idOperator = ?',
+      'SELECT dataBaseName, isAccount, phone FROM gm_data_000.operator WHERE idOperator = ?',
       [idOperator],
     );
     if (!Array.isArray(targetRows) || targetRows.length === 0) {
       return res.status(404).json({ error: '数据不存在!' });
     }
     targetDataBase = targetRows[0].dataBaseName;
+    targetIsAccount = Number(targetRows[0].isAccount) === 1;
+    targetPhone = targetRows[0].phone;
     if (!rbac.isPlatformAdmin(req) && targetDataBase !== req.data.dataBase) {
       return res.status(403).json({ error: '无权限:仅可操作本租户操作员!' });
     }
   } catch (error) {
     return public.handleQueryError(res, error);
   }
+
+  // 列白名单过滤:非平台管理员提交的提权列直接丢弃,其余非白名单列也不原样落库 20261021 审查修复 中F,
+  // (否则操作员自己就能把 isAccount 改成 1 拿到平台管理员身份,或把 dataBaseName 改到其他租户)
+  const canWritePrivilegedFields = rbac.isPlatformAdmin(req);
+  Object.keys(req.body).forEach((key) => {
+    if (statementMetaFields.has(key)) {
+      return;
+    }
+    if (privilegedOperatorFields.has(key)) {
+      if (!canWritePrivilegedFields) {
+        delete req.body[key];
+      }
+      return;
+    }
+    if (!allowedOperatorUpdateFields.has(key)) {
+      delete req.body[key];
+    }
+  });
 
   const sqlList = [];
   req.body.table = "gm_data_000.operator";
@@ -81,12 +137,14 @@ router.post('/update', async (req, res) => {
 
   // 密码字段若随更新提交,统一哈希后再落库 20260915 安全改造,
   // 已是bcrypt哈希时跳过,防止前端回填的旧哈希被二次哈希导致登录失效 20260916 修复,
+  let passwordUpdated = false;
   if (req.body.password !== undefined && req.body.password !== '' && !public.isBcryptHash(req.body.password)) {
     req.body.password = await public.hashPassword(req.body.password);
+    passwordUpdated = true;
   }
 
-  //如果是账户则更新账户信息表,兼容前端传字符串"1"的情况
-  if (Number(req.body.isAccount) === 1) {  
+  //如果是账户则更新账户信息表:按库中 isAccount 事实判定,不采用客户端提交值 20261021 审查修复 中F 调整,
+  if (targetIsAccount) {  
     // 用目标操作员所属租户同步 account,避免平台管理员跨租户操作时误改本租户账户 20260917 修复,
     const dataBaseName = targetDataBase;
     const accountUpdate = {
@@ -112,7 +170,18 @@ router.post('/update', async (req, res) => {
   }
   const statement = public.getUpdateByIdStatement(req.body);
   sqlList.push(statement);
-  return public.Transaction(sqlList,res);
+
+  // 口令在本次更新里被真正改动时作废该操作员的活跃登录态:旧 token 不应在到期前继续可用 20261021 审查修复 P0-3,
+  if (passwordUpdated && targetPhone) {
+    try {
+      await loginState.deleteActiveLogin(targetPhone);
+    } catch (error) {
+      console.error('revoke login session failed:', error);
+    }
+  }
+
+  // 区域/提权列变更后作废守卫缓存,不等 30s TTL 自然过期(审查修复 20261021 P2 性能),
+  return public.Transaction(sqlList, res, { onCommitted: rbac.invalidateAuthCaches });
 });
 
 router.post('/password', async (req, res) => {
@@ -122,7 +191,8 @@ router.post('/password', async (req, res) => {
   }
 
   // 先取出存储密码再比对:bcrypt哈希优先,兼容存量明文 20260915 安全改造,
-  const sqlCheck = 'SELECT idOperator, dataBaseName, isAccount, password FROM gm_data_000.operator WHERE idOperator = ?';
+  // phone 一并取出供新口令强度校验(不得等于登录手机号)复用,避免多一次回查 20261021 审查修复 中E,
+  const sqlCheck = 'SELECT idOperator, dataBaseName, isAccount, password, phone FROM gm_data_000.operator WHERE idOperator = ?';
   try {
     const results = await pool.query(sqlCheck, [idOperator]);
     if (results.length === 0) {
@@ -139,6 +209,11 @@ router.post('/password', async (req, res) => {
     if (!valid) {
       res.status(200).json({ code: 0, data: 0});
       return;
+    }
+    // 新口令强度校验:不得少于 6 位、不得与登录手机号相同(与新建同口径) 20261021 审查修复 中E,
+    const passwordError = public.validateSubmittedPassword(req.body.newPassword, operatorInfo.phone);
+    if (passwordError) {
+      return res.status(400).json({ error: passwordError });
     }
 
     const hashedNew = await public.hashPassword(req.body.newPassword);
@@ -160,6 +235,12 @@ router.post('/password', async (req, res) => {
     }
 
     await pool.withTransaction(sqlList);
+    // 改密成功后立刻作废服务端登录态,迫使持旧 token 的会话重新登录(前端据此回到登录页) 20261021 审查修复 P0-3,
+    try {
+      await loginState.deleteActiveLogin(operatorInfo.phone);
+    } catch (error) {
+      console.error('revoke login session failed:', error);
+    }
     return res.status(200).json({ code: 0, data: 1 });
   } catch (error) {
     return public.handleQueryError(res, error);
@@ -187,6 +268,7 @@ router.post('/power', async (req, res) => {
     ${tenantSql}`;
   try {
     const results = await pool.query(sql, sqlParams);
+    rbac.invalidateAuthCaches();
     return public.respondAffectedRows(res, results);
   } catch (error) {
     return public.handleQueryError(res, error);

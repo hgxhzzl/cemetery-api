@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../database');
 const public = require('../public');
+const config = require('../config');
 module.exports = router;
 
 router.post('/insert', async (req, res) => {
@@ -15,44 +16,69 @@ router.post('/insert', async (req, res) => {
   let table = req.data.dataBase+".room";
   let region = req.body.region;
   let park = req.body.park;
+
+  // 批量上限(审查修复 20261021 P1-3):排×号的跨度乘积即待建行数由前端任意给定,原写法不设上限,
+  // 一次提交数万条语句会打满事务未提交行与内存,超限直接 400 要求分批登记,
+  const planCount = (json.yNumTo - json.yNum + 1) * (json.xNumTo - json.xNum + 1);
+  if (planCount > config.roomBatch.maxCreate) {
+    return res.status(400).json({
+      error: `单次新建墓位 ${planCount} 个超过上限 ${config.roomBatch.maxCreate} 个，请缩小范围分批登记!`,
+    });
+  }
+
+  const summary = { created: 0, skipped: 0 };
   // 已迁出的墓位坐标视为空位，允许新建（迁出后该位置可重新登记墓穴）20260921 新增
-let sqlhave = `select yNum,xNum from ${table} where isDeleted = 0 and region = ? and park = ? and (transferOutStatus IS NULL OR transferOutStatus <> 'statusType.transferOutStatusEnum.out')`
-  let sqlList = [];
-  try {
-    const resultshave = await pool.query(sqlhave, [region, park]);
+  // 审查修复 20261021 P1-3:全量已有坐标的读取与新建语句的生成一并收进同一事务,并先对本区本园区活动墓位 FOR UPDATE,
+  // 原「事务外读快照 + 每个待建坐标线性扫描已有行」在万级存量下批量建位直接卡死,
+  // 且两个窗口同时提交同一批坐标会双双通过校验造成重复墓位(现在锁后重读,后一个事务看到前一个的结果),
+  const sqlList = [async (connection) => {
+    const occupiedRows = await public.queryWith(
+      connection,
+      `select yNum, xNum from ${table}` +
+        ` where isDeleted = 0 and region = ? and park = ?` +
+        ` and (transferOutStatus IS NULL OR transferOutStatus <> 'statusType.transferOutStatusEnum.out')` +
+        ' for update',
+      [region, park],
+    );
+    // 坐标集合一次性建为 Set:待建坐标判定从 O(已有行数) 降为 O(1)
+    const occupied = new Set((occupiedRows || []).map((item) => `${item.yNum}:${item.xNum}`));
+
     for (let i = json.yNum; i < json.yNumTo + 1; i++) {
       for (let j = json.xNum; j < json.xNumTo + 1; j++) {
-        let have = 0;
-        if (resultshave.length > 0) {
-          resultshave.forEach((item) => {  
-            if (item.yNum === i) {
-              if (item.xNum === j) {
-                have = 1;
-              }
-            }
-          });
-        }     
-        if (have === 0) {
-          const insertPayload = {
-            ...req.body,
-            yNum: i,
-            xNum: j,
-            table,
-          };
-          //新增时xyNumber默认值为 yNum排xNum号,前端已填写则以前端为准 20260831,
-          if (insertPayload.xyNumber === undefined || insertPayload.xyNumber === null || insertPayload.xyNumber === '') {
-            insertPayload.xyNumber = `${i}排${j}号`;
-          }
-          const statement = public.getInsertStatement(insertPayload);
-          sqlList.push(statement);
-
+        const coordKey = `${i}:${j}`;
+        if (occupied.has(coordKey)) {
+          summary.skipped += 1;
+          continue;
         }
+        occupied.add(coordKey);
+        const insertPayload = {
+          ...req.body,
+          yNum: i,
+          xNum: j,
+          table,
+        };
+        //新增时xyNumber默认值为 yNum排xNum号,前端已填写则以前端为准 20260831,
+        if (insertPayload.xyNumber === undefined || insertPayload.xyNumber === null || insertPayload.xyNumber === '') {
+          insertPayload.xyNumber = `${i}排${j}号`;
+        }
+        await public.execWith(connection, [public.getInsertStatement(insertPayload)]);
+        summary.created += 1;
       }
     }
+    // 返回本事务项自己执行的写入行数(withTransaction 不累计函数型事务项的影响行数)
+    return summary.created;
+  }];
+
+  try {
+    const result = await pool.withTransaction(sqlList);
+    return public.respondTransaction(res, result, { data: summary });
   } catch (error) {
+    // 库层坐标唯一索引 uk_room_coord 作为并发兜底,命中时转友好 400 而非 500(审查修复 20261021 P1-3),
+    if (error && error.code === 'ER_DUP_ENTRY' && /uk_room_coord/.test(String(error.message))) {
+      return res.status(400).json({ error: '部分墓位坐标已被并发占用，请刷新墓位列表后重新提交!' });
+    }
     return public.handleQueryError(res, error);
   }
-  return public.Transaction(sqlList, res);
 });
 
 router.post('/update', async (req, res) => {
@@ -72,8 +98,9 @@ router.post('/update', async (req, res) => {
 
     req.body.idfield ="idRoom";
     req.body.idvalue =idRoom;
-    const statement = public.getUpdateByIdStatement(req.body);
     try {
+      // 语句构造纳入 try：body 含非法键名时 assertIdentifier 抛错转 500 应答而非悬空请求（审查修复 20261021 ②）
+      const statement = public.getUpdateByIdStatement(req.body);
       const results = await pool.query(statement.sql, statement.params);
       return public.respondAffectedRows(res, results);
     } catch (error) {
@@ -95,18 +122,21 @@ router.post('/update', async (req, res) => {
     delete updatePayload.operator;
     // 多条修改不更新编号，避免范围内墓位被覆写为同一编号 20260831 新增,
     delete updatePayload.xyNumber;
-
-    const currentTime = public.getCurrentDateTime();
-    updatePayload.modifyDate = currentTime;
     updatePayload.operator = operator;
 
-    const fields = Object.keys(updatePayload);
-    const assignments = fields.map((field) => `${field} = ?`).join(', ');
-    const values = fields.map((field) => updatePayload[field]);
-    const sql = `update ${table} set ${assignments} where xNum >= ? and xNum <= ? and yNum >= ? and yNum <= ? and region = ? and park = ?`;
-
     try {
-      const results = await pool.query(sql, [...values, json.xNum, json.xNumTo, json.yNum, json.yNumTo, region, park]);
+      // 改走公共语句构造：原手写 SET 把请求体键名与 table 直接插进 SQL（值参数化了但标识符裸拼，
+      // 可改写任意列/任意表），getUpdateByConditionStatement 内部对表名/列名做白名单校验，
+      // 并自动补 modifyDate（审查修复 20261021 ①）
+      const statement = public.getUpdateByConditionStatement({
+        ...updatePayload,
+        table,
+        condition: {
+          sql: 'xNum >= ? and xNum <= ? and yNum >= ? and yNum <= ? and region = ? and park = ?',
+          params: [json.xNum, json.xNumTo, json.yNum, json.yNumTo, region, park],
+        },
+      });
+      const results = await pool.query(statement.sql, statement.params);
       return public.respondAffectedRows(res, results);
     } catch (error) {
       return public.handleQueryError(res, error);

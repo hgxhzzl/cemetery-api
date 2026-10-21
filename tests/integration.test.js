@@ -6,9 +6,20 @@ const bodyParser = require('body-parser');
 const database = require('../database');
 
 // mock 连接池:记录所有 SQL 调用,SELECT 返回预设行;mysql2 风格 query 返回 [rows, fields] 元组 20260917 新增,
+// 20261021 扩展:第二参可传 { routes: [[子串, rows], ...] } 按语句模式路由不同返回行,
+// 适配同一用例内多种 SELECT 需不同形状行的场景(未命中任何模式时返回空行集)
 function createMockPool(selectRows = []) {
-  let rows = selectRows;
+  const routes = selectRows && !Array.isArray(selectRows) && Array.isArray(selectRows.routes) ? selectRows.routes : null;
+  const defaultRows = Array.isArray(selectRows) ? selectRows : [];
+  let rows = defaultRows;
   const calls = [];
+  const resolveRows = (sql) => {
+    if (!routes) {
+      return rows;
+    }
+    const hit = routes.find(([pattern]) => String(sql).includes(pattern));
+    return hit ? hit[1] : [];
+  };
   return {
     calls,
     setSelectRows(nextRows) {
@@ -16,13 +27,14 @@ function createMockPool(selectRows = []) {
     },
     async query(sql, params) {
       calls.push({ sql, params });
-      return [rows];
+      return [resolveRows(sql)];
     },
     async getConnection() {
       return {
         async beginTransaction() {},
         async query(sql, params) {
           calls.push({ sql, params });
+          return [resolveRows(sql)];
         },
         async commit() {},
         async rollback() {},
@@ -33,12 +45,12 @@ function createMockPool(selectRows = []) {
   };
 }
 
-// 挂载路由并模拟认证中间件注入租户信息 20260917 新增,
-function startServer(router, mountPath) {
+// 挂载路由并模拟认证中间件注入租户信息(可选 next.data 覆盖负载,用于构造平台/租户管理员不同口径) 20260917 新增,
+function startServer(router, mountPath, overrideData) {
   const app = express();
   app.use(bodyParser.json());
   app.use((req, res, next) => {
-    req.data = { dataBase: 'gm_data_001', userName: 'tester', phone: '13800138000', exp: '1789000000' };
+    req.data = { dataBase: 'gm_data_001', userName: 'tester', phone: '13800138000', exp: '1789000000', ...(overrideData || {}) };
     next();
   });
   app.use(mountPath, router);
@@ -50,14 +62,142 @@ test.afterEach(() => {
   database.resetPoolForTesting();
 });
 
+// 守卫缓存(菜单权限命中/区域名单)为进程级 30s TTL,用例间必须主动作废,
+// 否则同一 userId 在上一条用例里缓存的结果会串到下一条,使 mock 改行集不再生效 20261021 新增,
+test.beforeEach(() => {
+  require('../rbac').invalidateAuthCaches();
+});
+
+// 批量建位上限(审查修复 20261021 P1-3):排×号跨度乘积即待建行数由前端任意给定,超限必须 400 且不发出任何写库语句,
+// 否则一次提交数万条 insert 会打满事务内未提交行与内存,
+test('room/save insert: 批量建位超过上限时 400 且不发任何写库语句', async () => {
+  const mockPool = createMockPool([]);
+  database.setPoolForTesting(mockPool);
+
+  const roomSave = require('../room/save');
+  const { server, base } = startServer(roomSave, '/api/room-save');
+  try {
+    const response = await fetch(`${base}/api/room-save/insert`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ region: '福东', park: '一园', yNum: 1, yNumTo: 40, xNum: 1, xNumTo: 40 }),
+    });
+    assert.strictEqual(response.status, 400);
+    const body = await response.json();
+    assert.ok(/上限/.test(body.error), `应答应说明超限原因,实际: ${body.error}`);
+    assert.ok(!mockPool.calls.some((call) => call.sql.includes('insert into')), '超限时不应发出插入语句');
+  } finally {
+    server.close();
+    database.resetPoolForTesting();
+  }
+});
+
+// 批量建位去重与影响行数(审查修复 20261021 P1-3):已占用坐标在事务内 FOR UPDATE 一次读出后建 Set 去重,
+// 跳过已存在行不重复插入;函数型事务项的返回行数需计入 affectedRows(原写法恒计 0),
+test('room/save insert: 事务内锁定已占用坐标,跳过重复且 affectedRows 计入实建行数', async () => {
+  const mockPool = createMockPool({
+    routes: [['select yNum, xNum from gm_data_001.room', [{ yNum: 1, xNum: 1 }]]],
+  });
+  database.setPoolForTesting(mockPool);
+
+  const roomSave = require('../room/save');
+  const { server, base } = startServer(roomSave, '/api/room-save');
+  try {
+    const response = await fetch(`${base}/api/room-save/insert`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ region: '福东', park: '一园', yNum: 1, yNumTo: 2, xNum: 1, xNumTo: 2 }),
+    });
+    assert.strictEqual(response.status, 200);
+    const body = await response.json();
+    assert.strictEqual(body.affectedRows, 3, '4 个待建坐标中 1 个已占用,应计 3 行');
+    // 统一信封后实建/跳过行数与 affectedRows 一同放入 data 下发(前端 transformRequestHook 只返回 data),
+    assert.deepStrictEqual(body.data, { affectedRows: 3, created: 3, skipped: 1 }, '应回报实建与跳过行数');
+
+    const lock = mockPool.calls.find((call) => call.sql.includes('for update'));
+    assert.ok(lock, '已有坐标应在事务内加锁读取');
+    assert.ok(lock.sql.includes('isDeleted = 0'), '只锁活动墓位(已软删行可复用坐标)');
+    assert.ok(lock.sql.includes("transferOutStatus <> 'statusType.transferOutStatusEnum.out'"), '已迁出坐标应视为空位');
+
+    const inserts = mockPool.calls.filter((call) => call.sql.includes('insert into gm_data_001.room'));
+    assert.strictEqual(inserts.length, 3, '不应为已占用坐标插入重复墓位');
+    // 从列名清单定位 yNum/xNum 对应参数,核对实建的就是剩下三个坐标 20261021 新增,
+    const coordKeys = inserts.map((call) => {
+      const cols = call.sql
+        .slice(call.sql.indexOf('(') + 1, call.sql.indexOf(')'))
+        .split(',')
+        .map((item) => item.trim());
+      return `${call.params[cols.indexOf('yNum')]}:${call.params[cols.indexOf('xNum')]}`;
+    });
+    assert.deepStrictEqual(coordKeys.sort(), ['1:2', '2:1', '2:2'], '应跳过已占用的 1排1号');
+    // 事务项内的语句经连接层统一做 $N→? 归一:语句构造器输出 $N 占位符,
+    // 而驱动未开 namedPlaceholders,原样发出会报 Unknown column '$1' 20261021 新增,
+    assert.ok(!inserts[0].sql.includes('$1'), '事务项内语句应已归一为 ? 占位符');
+    assert.strictEqual((inserts[0].sql.match(/\?/g) || []).length, inserts[0].params.length, '占位符与参数个数应一致');
+  } finally {
+    server.close();
+    database.resetPoolForTesting();
+  }
+});
+
+// 修改操作员列白名单:非平台管理员提交 isAccount=1(自我提权)或 dataBaseName(跳租户)不得进入 SET,
+// 业务列照常落库;账户同步分支改按库中 isAccount 判定,客户端提交值不采信 20261021 审查修复 中F,
+test('operator/save update: 非平台管理员提交的提权列被剔除,业务列照常更新', async () => {
+  const mockPool = createMockPool({
+    routes: [
+      ['SELECT dataBaseName, isAccount, phone FROM gm_data_000.operator', [{ dataBaseName: 'gm_data_001', isAccount: 0, phone: '13800138000' }]],
+    ],
+  });
+  database.setPoolForTesting(mockPool);
+
+  const operatorSave = require('../operator/save');
+  const { server, base } = startServer(operatorSave, '/api/operator-save');
+  try {
+    const response = await fetch(`${base}/api/operator-save/update`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        idOperator: 1001,
+        name: '张三',
+        region: '福东',
+        isAccount: 1,
+        dataBaseName: 'gm_data_999',
+        createDate: '2020-01-01 00:00:00',
+      }),
+    });
+    assert.strictEqual(response.status, 200);
+
+    const update = mockPool.calls.find((call) => call.sql.includes('gm_data_000.operator set'));
+    assert.ok(update, '应发出操作员更新语句');
+    assert.ok(update.sql.includes('name ='), '业务列 name 应落库');
+    assert.ok(update.sql.includes('region ='), '业务列 region 应落库');
+    assert.ok(!update.sql.includes('isAccount'), '提权列 isAccount 不得落库');
+    assert.ok(!update.sql.includes('dataBaseName'), '提权列 dataBaseName 不得落库');
+    assert.ok(!update.sql.includes('createDate'), '审计列 createDate 不得由客户端覆写');
+  } finally {
+    server.close();
+    database.resetPoolForTesting();
+  }
+});
+
 test('sale/delete: 软删销售 + 墓位回置未销售(清空buyer) + 软删联系人 + contacts聚合,同一事务', async () => {
-  const mockPool = createMockPool([{ payer: '张三' }]);
+  // 20261018 ④ 改版后语句序列:先取活动销售(idSale+payer),再统计剩余非派生下葬,后接事务写 20261021 对齐既有失败用例,
+  const mockPool = createMockPool({
+    routes: [
+      ['FROM gm_data_001.sale', [{ idSale: 12, payer: '张三' }]],
+      ['from gm_data_001.buried', [{ cnt: 0, minBurial: null }]],
+    ],
+  });
   database.setPoolForTesting(mockPool);
 
   const saleDelete = require('../sale/delete');
   const { server, base } = startServer(saleDelete, '/api/sale-delete');
   try {
-    const response = await fetch(`${base}/api/sale-delete?idRoom=1000001`);
+    const response = await fetch(`${base}/api/sale-delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idRoom: 1000001 }),
+    });
     assert.strictEqual(response.status, 200);
     const body = await response.json();
     assert.strictEqual(body.code, 0);
@@ -65,11 +205,13 @@ test('sale/delete: 软删销售 + 墓位回置未销售(清空buyer) + 软删联
     const calls = mockPool.calls;
     const sqls = calls.map((call) => call.sql);
     // 1. 先查活动销售记录的付款人
-    assert.ok(sqls[0].includes('SELECT payer'));
+    assert.ok(sqls[0].includes('SELECT idSale, payer'));
     // 2. 软删 sale:条件参数化
     assert.ok(sqls.some((sql) => sql.includes('gm_data_001.sale set') && sql.includes('idRoom = ? AND isDeleted = 0')));
-    // 3. 墓位回置未销售 + 清空购墓人(值在 params 中)
-    const roomUpdate = calls.find((call) => call.sql.includes('gm_data_001.room set'));
+    // 3. 墓位回置未销售 + 清空购墓人(值在 params 中;按 unsold 参数定位,避开归零链路先发的 room 起止清空语句)
+    const roomUpdate = calls.find(
+      (call) => call.sql.includes('gm_data_001.room set') && call.params.includes('statusType.saleStatusEnum.unsold'),
+    );
     assert.ok(roomUpdate);
     assert.ok(roomUpdate.params.includes('statusType.saleStatusEnum.unsold'));
     assert.ok(roomUpdate.params.includes(''));
@@ -110,12 +252,17 @@ test('buried/save insert: 下葬 + 锚定日期 + 墓位置已下葬 + deceased�
 
     const calls = mockPool.calls;
     const sqls = calls.map((call) => call.sql);
-    // 1. 联系人匹配查询
-    assert.ok(sqls[0].includes('from gm_data_001.contacts where idRoom = ?'));
+    // 1. 锚定日先查最早下葬日(20261018 ⑤ 改版后首位不再是联系人匹配,改为断言其存在),联系人匹配随后在列
+    assert.ok(sqls.some((sql) => sql.includes('select min(burialDate)')));
+    assert.ok(sqls.some((sql) => sql.includes('from gm_data_001.contacts where idRoom = ?')));
     // 2. 插入下葬记录
     assert.ok(sqls.some((sql) => sql.includes('insert into gm_data_001.buried')));
-    // 3. 管理费起止日期锚定(参数化)
-    assert.ok(sqls.some((sql) => sql.includes('select min(burialDate)') && sql.includes('coalesce(endDate')));
+    // 3. 管理费起止锚定链:重排需先读活动收款行,再写 room 起止(20261018 ⑤ 改版后不再直写 coalesce(endDate)
+    assert.ok(sqls.some((sql) => sql.includes('from gm_data_001.adminfee') && sql.includes('order by createDate asc')));
+    // 20261021 审查修复中C:费用链的读全部落在事务内且先锁墓位行,收款行读取同样带行锁,
+    assert.ok(sqls.some((sql) => sql.includes('gm_data_001.room where idRoom = ? for update')));
+    assert.ok(sqls.some((sql) => sql.includes('order by createDate asc, idAdminfee asc for update')));
+    assert.ok(sqls.some((sql) => sql.includes('gm_data_001.room set startDate')));
     // 4. 墓位置已下葬
     const roomUpdate = calls.find(
       (call) => call.sql.includes('gm_data_001.room set') && call.params.includes('statusType.intoStatusEnum.buried'),
@@ -155,6 +302,69 @@ test('login/logout: 删除 login_session 登录态记录,当前 token 立即失�
     assert.strictEqual(calls.length, 1);
     assert.ok(calls[0].sql.includes('DELETE FROM gm_data_000.login_session'));
     assert.ok(calls[0].params.includes('13800138000'));
+  } finally {
+    server.close();
+  }
+});
+
+// 改密与登录态必须联动:口令改了但 login_session 仍活跃时,旧 token 在到期前依然能调全部接口 20261021 审查修复 P0-3,
+test('operator/password: 改密成功后作废该手机号的活跃登录态', async () => {
+  const public = require('../public');
+  const hashedOld = await public.hashPassword('old-pass-123');
+  const mockPool = createMockPool({
+    routes: [
+      [
+        'FROM gm_data_000.operator WHERE idOperator = ?',
+        [{ idOperator: 1001, dataBaseName: 'gm_data_001', isAccount: 0, phone: '13900139000', password: hashedOld }],
+      ],
+    ],
+  });
+  database.setPoolForTesting(mockPool);
+
+  const operatorSave = require('../operator/save');
+  const { server, base } = startServer(operatorSave, '/api/operator-save');
+  try {
+    const response = await fetch(`${base}/api/operator-save/password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idOperator: 1001, oldPassword: 'old-pass-123', newPassword: 'new-pass-456' }),
+    });
+    assert.strictEqual(response.status, 200);
+    const body = await response.json();
+    assert.strictEqual(body.data, 1, '旧密码匹配且新密码合法时应返回修改成功');
+
+    const revoke = mockPool.calls.find((call) => call.sql.includes('DELETE FROM gm_data_000.login_session'));
+    assert.ok(revoke, '应作废旧的活跃登录态');
+    assert.ok(revoke.params.includes('13900139000'), '按库中取出的 phone 删除,而不是客户端提交值');
+  } finally {
+    server.close();
+  }
+});
+
+// 一个手机号在多个园区各一条操作员时,旧写法静默取 results[0]（取哪一行由引擎决定）可能跨租户误登 20261021 审查修复 P0-4,
+test('login: 同一手机号命中多个园区且未指定园区时拒绝登录', async () => {
+  const twoCandidates = [
+    { idOperator: 1, dataBaseName: 'gm_data_001', isAccount: 0, password: 'x' },
+    { idOperator: 2, dataBaseName: 'gm_data_002', isAccount: 0, password: 'x' },
+  ];
+  const mockPool = createMockPool({
+    routes: [['FROM gm_data_000.operator a,gm_data_000.account b', twoCandidates]],
+  });
+  database.setPoolForTesting(mockPool);
+
+  const login = require('../login');
+  const { server, base } = startServer(login, '/api/login');
+  try {
+    const response = await fetch(`${base}/api/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: '13800138000', password: 'any' }),
+    });
+    assert.strictEqual(response.status, 400);
+    const body = await response.json();
+    assert.ok(String(body.message).includes('个园区账号'), '应提示需要区分园区');
+    // 查候选集的 SQL 必须带固定排序,不能依赖引擎返回顺序
+    assert.ok(mockPool.calls[0].sql.includes('ORDER BY b.dataBaseName'));
   } finally {
     server.close();
   }
@@ -435,7 +645,11 @@ test('reserve/delete: 软删预定 + 墓位只回置未预定(销售状态不动
   const reserveDelete = require('../reserve/delete');
   const { server, base } = startServer(reserveDelete, '/api/reserve-delete');
   try {
-    const response = await fetch(`${base}/api/reserve-delete?idRoom=1000001`);
+    const response = await fetch(`${base}/api/reserve-delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idRoom: 1000001 }),
+    });
     assert.strictEqual(response.status, 200);
 
     const sqls = mockPool.calls.map((call) => call.sql);
@@ -457,8 +671,17 @@ test('reserve/delete: 软删预定 + 墓位只回置未预定(销售状态不动
 });
 
 test('gravePlotBusiness/save update(sale): 下葬日期/死亡日期留空时绑 null 而非空串', async () => {
-  // sale 联查返回活动销售行(含 oldPayer/idRoom),buried 存在性查询复用同一行 → 走“有记录则更新”分支 20261011 新增,
-  const mockPool = createMockPool([{ oldPayer: '张三', idRoom: 1000001, idBuried: 3000001 }]);
+  // 20261012 加编号占位校验后同一用例内多种 SELECT 需不同行形:销售行带 oldPayer/idRoom、
+  // 区域查询带 region、占位查重返回空、buried 存在性返回 idBuried → 走“有记录则更新”分支 20261021 对齐既有失败用例,
+  const mockPool = createMockPool({
+    routes: [
+      ['FROM gm_data_001.sale', [{ oldPayer: '张三', idRoom: 1000001 }]],
+      ['select region from', [{ region: '福东' }]],
+      ['select idRoom from', []],
+      ['SELECT idBuried FROM', [{ idBuried: 3000001 }]],
+      ['select min(burialDate)', [{ minBurial: null }]],
+    ],
+  });
   database.setPoolForTesting(mockPool);
 
   const businessSave = require('../gravePlotBusiness/save');
@@ -516,7 +739,11 @@ test('transferOut/delete: 软删迁出 + 无剩余活动记录时墓位回置未
   const transferOutDelete = require('../transferOut/delete');
   const { server, base } = startServer(transferOutDelete, '/api/transferOut-delete');
   try {
-    const response = await fetch(`${base}/api/transferOut-delete?idTransfer=1&idRoom=1000001`);
+    const response = await fetch(`${base}/api/transferOut-delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idTransfer: 1, idRoom: 1000001 }),
+    });
     assert.strictEqual(response.status, 200);
     const body = await response.json();
     assert.strictEqual(body.code, 0);
@@ -544,7 +771,11 @@ test('adminfee/delete: 软删收款 + 按剩余活动记录重算管理费结束
   const adminfeeDelete = require('../adminfee/delete');
   const { server, base } = startServer(adminfeeDelete, '/api/adminfee-delete');
   try {
-    const response = await fetch(`${base}/api/adminfee-delete?idAdminfee=9`);
+    const response = await fetch(`${base}/api/adminfee-delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idAdminfee: 9 }),
+    });
     assert.strictEqual(response.status, 200);
     const body = await response.json();
     assert.strictEqual(body.code, 0);
@@ -619,14 +850,122 @@ test('rbac: 操作员具备菜单动作权限时放行,否则 403', async () => 
     // 有权限:mock 返回非空权限行 → 放行
     const okResponse = await fetch(`${base}/guard`);
     assert.strictEqual(okResponse.status, 200);
-    // 无权限:mock 返回空 → 403
+    // 无权限:mock 返回空 → 403。命中结果已改为 30s TTL 缓存,故先作废缓存模拟“管理员改了权限”
+    // 后再发第二个请求,否则仍会拿到上一条的缓存放行结果(审查修复 20261021 P2 性能),
     mockPool.setSelectRows([]);
+    rbac.invalidateAuthCaches();
     const deniedResponse = await fetch(`${base}/guard`);
     assert.strictEqual(deniedResponse.status, 403);
     // 权限查询语句按菜单ID过滤(useMenu)
     const permSql = mockPool.calls.find((call) => call.sql.includes('operator_power'));
     assert.ok(permSql);
     assert.ok(permSql.sql.includes('useMenu = 1'));
+  } finally {
+    server.close();
+  }
+});
+
+// 墓位信息查询改写后的语句口径(审查修复 20261021 P2 性能):count 不再 JOIN sale/contacts 派生表,
+// 日期/关键词改判 EXISTS,联系人列对本页行走相关子查询;参数个数必须与 ? 个数逐项对齐,
+test('roomQuery/list: count 单表取数,日期与关键词走 EXISTS,不再全表聚合派生表', async () => {
+  const mockPool = createMockPool({ routes: [['COUNT(*) AS total', [{ total: 7 }]], ['FROM gm_data_001.room r WHERE', []]] });
+  database.setPoolForTesting(mockPool);
+
+  const roomQuery = require('../roomQuery/query');
+  const { server, base } = startServer(roomQuery, '/api/room-query');
+  try {
+    const response = await fetch(
+      `${base}/api/room-query/list?region=%E7%A6%8F%E4%B8%9C&startDate=2026-01-01&endDate=2026-01-31&keyword=%E5%BC%A0&sold=true&current=2&pageSize=20`,
+    );
+    assert.strictEqual(response.status, 200);
+    const body = await response.json();
+    assert.strictEqual(body.data.total, 7);
+
+    const calls = mockPool.calls.filter((call) => call.sql.includes('gm_data_001.room r'));
+    assert.strictEqual(calls.length, 2, '应先 count 后取页两段查询');
+    const [countCall, dataCall] = calls;
+
+    assert.ok(!countCall.sql.includes('LEFT JOIN'), 'count 不应再 JOIN 任何表');
+    assert.ok(!countCall.sql.includes('GROUP BY idRoom'), '不应再带全表聚合的派生表');
+    assert.ok(countCall.sql.includes('EXISTS (SELECT 1 FROM gm_data_001.sale s'), '日期范围应改判 EXISTS');
+    assert.ok(countCall.sql.includes('EXISTS (SELECT 1 FROM gm_data_001.contacts ck'), '关键词应包含联系人 EXISTS');
+    assert.strictEqual((countCall.sql.match(/\?/g) || []).length, countCall.params.length, 'count 占位符与参数个数应一致');
+
+    assert.ok(!dataCall.sql.includes('LEFT JOIN'), '本页取数不应再 JOIN sale/contacts');
+    assert.ok(dataCall.sql.includes('AS payerPhone'), '销售列应以别名保留');
+    assert.ok(dataCall.sql.includes('AS contacts'), '联系人列应以别名保留');
+    assert.strictEqual(dataCall.params[dataCall.params.length - 2], 20, 'pageSize 应为最后一个参数前一位');
+    assert.strictEqual(dataCall.params[dataCall.params.length - 1], 20, 'offset 应为 (current-1)*pageSize');
+    assert.strictEqual((dataCall.sql.match(/\?/g) || []).length, dataCall.params.length, '页查询占位符与参数个数应一致');
+  } finally {
+    server.close();
+    database.resetPoolForTesting();
+  }
+});
+
+// 响应信封统一(审查修复 20261021 P1-5):全站历史手写 `json({ error })` 经 normalizeEnvelope 补齐 code/message,
+// 0 行更新不再是 `code: 0`+404 的矛盾体,前端无论读 message 还是读 error 都能拿到可读文案,
+test('响应信封: 历史 {error} 写法与 0 行更新都输出可用 code/message', async () => {
+  const publicFun = require('../public');
+  const app = express();
+  app.use(publicFun.normalizeEnvelope);
+  app.get('/legacy', (req, res) => res.status(400).json({ error: '编号已被其它墓位占用' }));
+  app.get('/ok', (req, res) => res.json({ code: 0, data: { list: [] } }));
+  app.get('/zero', (req, res) => publicFun.respondAffectedRows(res, { affectedRows: 0 }));
+  const server = app.listen(0);
+  try {
+    const base = `http://127.0.0.1:${server.address().port}`;
+
+    const legacy = await fetch(`${base}/legacy`);
+    assert.strictEqual(legacy.status, 400);
+    const legacyBody = await legacy.json();
+    assert.strictEqual(legacyBody.code, 400, '缺 code 时应取 HTTP 状态码');
+    assert.strictEqual(legacyBody.message, '编号已被其它墓位占用', 'error 文案应透到 message');
+
+    const ok = await fetch(`${base}/ok`);
+    const okBody = await ok.json();
+    assert.strictEqual(okBody.code, 0);
+    assert.strictEqual(okBody.message, '操作成功', '成功体补默认 message');
+    assert.strictEqual(okBody.error, undefined, '成功体不应背 error 字段');
+
+    const zero = await fetch(`${base}/zero`);
+    assert.strictEqual(zero.status, 404);
+    const zeroBody = await zero.json();
+    assert.notStrictEqual(zeroBody.code, 0, '0 行更新不能仍报成功码');
+    assert.ok(zeroBody.message.includes('不存在'), '给出语义 message');
+    assert.strictEqual(zeroBody.error, zeroBody.message, '兼容位 error 与 message 同值');
+  } finally {
+    server.close();
+  }
+});
+
+test('rbac: 菜单权限命中结果 30s 内复用缓存,授权变更后立即作废', async () => {
+  // 一次页面加载会并行打多个接口前缀,每个守卫都要跑一次 operator_power JOIN(审查修复 20261021 P2 性能),
+  // 同一 userId + 同一菜单集合的命中结果应只打一次库;权限落库后不得再拿旧结果放行,
+  const mockPool = createMockPool([{ 1: 1 }]);
+  database.setPoolForTesting(mockPool);
+
+  const rbac = require('../rbac');
+  const app = express();
+  app.use((req, res, next) => {
+    req.data = { dataBase: 'gm_data_001', userName: 'tester', phone: '13800138000', userId: 2100, isAccount: 0 };
+    next();
+  });
+  app.get('/guard', rbac.requirePowerByMenuName('room'), (req, res) => res.status(200).json({ code: 0 }));
+  const server = app.listen(0);
+  const powerCalls = () => mockPool.calls.filter((call) => call.sql.includes('operator_power')).length;
+  try {
+    const base = `http://127.0.0.1:${server.address().port}`;
+    assert.strictEqual((await fetch(`${base}/guard`)).status, 200);
+    assert.strictEqual((await fetch(`${base}/guard`)).status, 200);
+    assert.strictEqual((await fetch(`${base}/guard`)).status, 200);
+    assert.strictEqual(powerCalls(), 1, '同一次会话内重复命中应只打一次库');
+
+    // 模拟管理员把该菜单权限关掉:作废旧结果后下一次请求必须重新查库并 403,
+    rbac.invalidateAuthCaches();
+    mockPool.setSelectRows([]);
+    assert.strictEqual((await fetch(`${base}/guard`)).status, 403);
+    assert.strictEqual(powerCalls(), 2, '作废缓存后应重新查库');
   } finally {
     server.close();
   }
@@ -730,6 +1069,7 @@ test('cardColor/save: 合法配色色值规整大写并更新现有行(只做更
       body: JSON.stringify({
         config: {
           unsold: item('#dbd53a', '#a59f1f', true),
+          reserved: item('#fff0d9', '#d68c22', true),
           sold: item('#f4fef9', '#00a870', true),
           buried: item('#f4f8fe', '#0052d9', false),
           expired: item('#fce5e5', '#d54941', true),
@@ -795,6 +1135,7 @@ test('cardColor/save: 配置行被误删时补插 idConfig=1,保证保存不失�
       body: JSON.stringify({
         config: {
           unsold: item('#FCF6EF', '#FCA678', true),
+          reserved: item('#FFF0D9', '#D68C22', true),
           sold: item('#F4FEF9', '#00A870', true),
           buried: item('#F4F8FE', '#0052D9', true),
           expired: item('#FCE5E5', '#D54941', true),
@@ -953,6 +1294,28 @@ test('buriedQuery/list: sortMode 切换园区优先与下葬日期优先排序',
     assert.ok(!countCalls[0].sql.includes('LEFT JOIN'));
   } finally {
     server.close();
+  }
+});
+
+// 设备白名单口径统一(审查修复 20261021 P1-1):租户管理员同样 isAccount=1,但不得跨租户登记设备解锁任意登录,
+// 因此 requireAdmin 改按 rbac.isPlatformAdmin(额外限定 dataBase=gm_data_000)判定,
+test('device/bind: 租户管理员(isAccount=1 但非平台库)无权登记设备', async () => {
+  const mockPool = createMockPool([]);
+  database.setPoolForTesting(mockPool);
+
+  const device = require('../device');
+  const { server, base } = startServer(device.router, '/api/device', { isAccount: 1 });
+  try {
+    const response = await fetch(`${base}/api/device/bind`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deviceHash: 'a'.repeat(64), deviceName: 'pc-1' }),
+    });
+    assert.strictEqual(response.status, 403, '非平台总管库管理员应 403');
+    assert.ok(!mockPool.calls.some((call) => call.sql.includes('INSERT INTO gm_data_000.device')), '拒绝时不应写入白名单');
+  } finally {
+    server.close();
+    database.resetPoolForTesting();
   }
 });
 

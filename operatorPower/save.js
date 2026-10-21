@@ -38,6 +38,8 @@ router.post('/power', async (req, res) => {
 
   try {
     const results = await pool.query(sql, sqlParams);
+    // 权限开关落库后立即作废守卫缓存,不再让操作员在 30s TTL 内拿到旧权限(审查修复 20261021 P2 性能),
+    rbac.invalidateAuthCaches();
     return public.respondAffectedRows(res, results);
   } catch (error) {
     return public.handleQueryError(res, error);

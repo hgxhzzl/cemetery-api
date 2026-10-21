@@ -33,6 +33,49 @@ async function queryMenuPowerHit(userId, values, byMenuName) {
   return Array.isArray(rows) && rows.length > 0;
 }
 
+// 菜单权限命中结果短 TTL 缓存(审查修复 20261021 P2 性能):一次页面加载会并行打 6~10 个接口前缀,
+// 每个守卫都要跑一遍 operator_power JOIN(共 3 张表),而权限数据在几十秒内基本不变,
+// 按 userId + 菜单集合折叠成一次查库;命中与未命中均缓存(拒绝路径也常被反复重试),
+// 条目数超上限时按插入顺序淘汰最早一半,避免大量冷账号长期占用内存 20261021 新增,
+const POWER_CACHE_TTL_MS = 30 * 1000;
+const POWER_CACHE_MAX_ENTRIES = 2000;
+const powerCache = new Map();
+
+function buildPowerCacheKey(userId, values, byMenuName) {
+  return `${byMenuName ? 'name' : 'id'}:${userId}:${values.join(',')}`;
+}
+
+function evictPowerCacheOverflow() {
+  if (powerCache.size <= POWER_CACHE_MAX_ENTRIES) {
+    return;
+  }
+  const dropCount = Math.ceil(powerCache.size / 2);
+  for (const key of powerCache.keys()) {
+    if (dropCount <= 0) break;
+    powerCache.delete(key);
+    dropCount -= 1;
+  }
+}
+
+async function queryMenuPowerHitCached(userId, values, byMenuName) {
+  const key = buildPowerCacheKey(userId, values, byMenuName);
+  const cached = powerCache.get(key);
+  if (cached && Date.now() - cached.at < POWER_CACHE_TTL_MS) {
+    return cached.hit;
+  }
+  const hit = await queryMenuPowerHit(userId, values, byMenuName);
+  powerCache.set(key, { at: Date.now(), hit });
+  evictPowerCacheOverflow();
+  return hit;
+}
+
+// 授权相关变更后主动作废缓存:权限开关、操作员软删/改区域都会影响守卫结果,
+// 旧口径靠 30s TTL 自然过期,使管理员改完权限后操作员仍有一段错乱窗口 20261021 新增,
+function invalidateAuthCaches() {
+  powerCache.clear();
+  regionScopeCache.clear();
+}
+
 // 拒绝路径存在性检查:仅在权限查询未命中时补打一次库,用于区分"菜单未配置"与"有菜单无权限"两种文案,
 // 放行路径(绝大多数请求)不触发 20261019 性能优化,
 async function anyMenuNameConfigured(menuNames) {
@@ -50,7 +93,7 @@ function requirePower(menuId) {
     }
     try {
       // 命中查询单语句化,口径与旧两步查询一致(b.isDeleted=0 + a.useMenu=1) 20261019 性能优化,
-      if (await queryMenuPowerHit(req.data.userId, [menuId], false)) {
+      if (await queryMenuPowerHitCached(req.data.userId, [menuId], false)) {
         return next();
       }
       return res.status(403).json({ error: '无权限:当前账号缺少该菜单操作权限!' });
@@ -75,7 +118,7 @@ function requirePowerByMenuName(menuName, openPaths) {
       return next();
     }
     try {
-      if (await queryMenuPowerHit(req.data.userId, [menuName], true)) {
+      if (await queryMenuPowerHitCached(req.data.userId, [menuName], true)) {
         return next();
       }
       if (!(await anyMenuNameConfigured([menuName]))) {
@@ -99,7 +142,7 @@ function requirePowerByAnyMenuName(...menuNames) {
     }
     try {
       // 任一菜单命中权限即放行:IN 一次性查全部 name,拒绝路径再按名单做存在性检查 20261019 性能优化,
-      if (await queryMenuPowerHit(req.data.userId, menuNames, true)) {
+      if (await queryMenuPowerHitCached(req.data.userId, menuNames, true)) {
         return next();
       }
       if (!(await anyMenuNameConfigured(menuNames))) {
@@ -264,6 +307,45 @@ function buildRegionCondition(req, column) {
   return null;
 }
 
+// 主键记录区域归属校验中间件工厂:requireRegionScope 只校验显式 region 参数,按主键直取直写的
+// 详情/修改/软删路径不经过该判定——限定 A 区的操作员猜到 B 区 idRoom 仍可读取甚至作废 B 区数据。
+// 本中间件在 handler 前按主键查出记录所属 region 并验证∈名单(水平越权收口,审查修复 20261021 ④):
+// - table='room' 直查 room.region;其余业务表(均有 idRoom 列)JOIN room 取 region;
+// - 名单为空(平台管理员/未配区域)不拦截;参数缺失/非法交 handler 原有 400 逻辑;
+// - 记录不存在不拦截(无数据可泄,由 handler 回空结果/0 行);
+// - table/idField/idParam 均为代码侧固定字符串,不接受请求体输入,无注入面 20261021 新增,
+function requireRegionOwnership({ table, idField = 'idRoom', idParam = 'idRoom' }) {
+  return async function (req, res, next) {
+    const allowed = req.operatorRegions;
+    if (!Array.isArray(allowed) || allowed.length === 0 || !req.data || !req.data.dataBase) {
+      return next();
+    }
+    const raw = (req.query && req.query[idParam]) ?? (req.body && req.body[idParam]);
+    const idValue = public.parseNumericParam(raw);
+    if (idValue === null) {
+      return next();
+    }
+    try {
+      // 库名来自 token,防御性再过一次标识符白名单(防伪造 token 载荷把库名拼成注入载体)
+      const db = public.assertIdentifier(req.data.dataBase, 'database');
+      const sql = table === 'room'
+        ? `SELECT region FROM ${db}.room WHERE idRoom = ? LIMIT 1`
+        : `SELECT r.region FROM ${db}.${table} t JOIN ${db}.room r ON t.idRoom = r.idRoom WHERE t.${idField} = ? LIMIT 1`;
+      const rows = await pool.query(sql, [idValue]);
+      if (!Array.isArray(rows) || rows.length === 0) {
+        return next();
+      }
+      if (!allowed.includes(String(rows[0].region || '').trim())) {
+        console.log('region ownership denied:', req.data.userId, req.method, req.originalUrl, table, idValue);
+        return res.status(403).json({ error: '无权限:该记录不属于当前区域!' });
+      }
+      return next();
+    } catch (error) {
+      return public.handleQueryError(res, error);
+    }
+  };
+}
+
 // 按操作员所属区域收窄名单:rows 中 fieldName 命中 allowedRegions 的才保留;
 // allowedRegions 为空维持全量(即未配置区域/管理员的回退口径),调用方无需再各自判空 20261010 新增,
 function filterByOperatorRegions(rows, fieldName, allowedRegions) {
@@ -283,9 +365,11 @@ module.exports = {
   requirePowerByMenuName,
   requirePowerByAnyMenuName,
   requireQueryPowerWithDetail,
+  invalidateAuthCaches,
   fetchOperatorRegions,
   filterByOperatorRegions,
   requireRegionScope,
+  requireRegionOwnership,
   buildRegionCondition,
 };
 

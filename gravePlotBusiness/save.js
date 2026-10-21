@@ -121,7 +121,8 @@ router.post('/insert', async (req, res) => {
 
     req.body.table = req.data.dataBase + '.sale';
     req.body.operator = req.data.userName;
-    let price = req.body.realPrice.toString();
+    // 守卫化取值：原 req.body.realPrice.toString() 在缺字段时抛 TypeError，async handler 内无人接住会崩进程（审查修复 20261021 ②）
+    let price = String(req.body.realPrice ?? '');
     price = price.replace(/,/g, '');
     req.body.realPrice = price;
     delete req.body.realPriceString;
@@ -165,7 +166,7 @@ router.post('/insert', async (req, res) => {
     sqlList.push(sqlRoom);
 
     // 销售成交后清除该墓位对应的活动预定记录（reserve 软删 isDeleted=1，与全系统软删口径一致；本形态仅新建走此分支）20261017 新增,
-    sqlList.push(public.getUpdateByConditionStatement({
+    sqlList.push(public.getSoftDeleteByConditionStatement({
       table: req.data.dataBase + '.reserve',
       condition: { sql: 'idRoom = ? AND isDeleted = 0', params: [idRoom] },
       isDeleted: 1,
@@ -180,8 +181,11 @@ router.post('/insert', async (req, res) => {
         params: ['statusType.intoStatusEnum.buried', idRoom],
       });
       // 销带下葬并入下葬例程A统一维护管理期限:变更后最早下葬日=min(现有活动下葬,本次下葬日);有收款整链重排、无收款置 startDate=endDate=min 20261018 G1 新增,
-      try {
-        const minRows = await pool.query(
+      // 20261021 审查修复中C:链首日与活动收款行的读、重排结果的写一并收进同一事务(先锁墓位行),消除事务外读旧快照再全量覆写的丢更新窗口,
+      sqlList.push(async (conn) => {
+        await public.lockFeeChainRoot(conn, req.data.dataBase, idRoom);
+        const minRows = await public.queryWith(
+          conn,
           `select min(burialDate) as minBurial from ${req.data.dataBase}.buried where idRoom = ? and isDeleted = 0`,
           [idRoom],
         );
@@ -189,11 +193,8 @@ router.post('/insert', async (req, res) => {
           minRows && minRows.length > 0 ? minRows[0].minBurial : null,
           burialDate,
         );
-        const periodStatements = await public.applyFeePeriodRecascade(req.data.dataBase, idRoom, req.data.userName, anchorDay);
-        sqlList.push(...periodStatements);
-      } catch (error) {
-        return public.handleQueryError(res, error);
-      }
+        await public.applyFeePeriodRecascadeTx(conn, req.data.dataBase, idRoom, req.data.userName, anchorDay);
+      });
     }
 
     if (payer !== undefined && payer !== null && String(payer).trim() !== '') {
@@ -209,7 +210,8 @@ router.post('/insert', async (req, res) => {
       sqlList.push(public.getRoomContactsSyncSql(req.data.dataBase, idRoom));
     }
 
-    return public.Transaction(sqlList, res);
+    // 销售形态落 room.serialNo:走撞号兜底事务(库层 uk_room_region_serial 兼 TOCTOU,审查修复 20261021 中B)
+    return public.TransactionWithSerialGuard(sqlList, res);
   }
 
   // 预定形态:落 reserve 表(联系人/电话映射 liaison/liaisonPhone),同步 room 只置已预定(销售状态不动,同预定登记);
@@ -274,8 +276,11 @@ router.post('/insert', async (req, res) => {
     const sqlList = [public.getInsertStatement(req.body)];
 
     // 下葬变动统一维护管理期限(同下葬页新增):变更后最早下葬日=min(现有活动下葬,本次下葬日);无收款仅置 startDate/endDate=min,有收款整链重排 20261018 ⑤ 新增,
-    try {
-      const minRows = await pool.query(
+    // 20261021 审查修复中C:读写一并收进同一事务(先锁墓位行),
+    sqlList.push(async (conn) => {
+      await public.lockFeeChainRoot(conn, req.data.dataBase, idRoom);
+      const minRows = await public.queryWith(
+        conn,
         `select min(burialDate) as minBurial from ${req.data.dataBase}.buried where idRoom = ? and isDeleted = 0`,
         [idRoom],
       );
@@ -283,11 +288,8 @@ router.post('/insert', async (req, res) => {
         minRows && minRows.length > 0 ? minRows[0].minBurial : null,
         req.body.burialDate,
       );
-      const periodStatements = await public.applyFeePeriodRecascade(req.data.dataBase, idRoom, req.data.userName, anchorDay);
-      sqlList.push(...periodStatements);
-    } catch (error) {
-      return public.handleQueryError(res, error);
-    }
+      await public.applyFeePeriodRecascadeTx(conn, req.data.dataBase, idRoom, req.data.userName, anchorDay);
+    });
 
     const json = {
       table: req.data.dataBase + '.room',
@@ -370,7 +372,8 @@ router.post('/insert', async (req, res) => {
   delete req.body.contactsIDCard;
   req.body.table = req.data.dataBase + '.graveplotbusiness';
   req.body.operator = req.data.userName;
-  let price = req.body.realPrice.toString();
+  // 守卫化取值：同上，缺 realPrice 时原实现直接崩进程（审查修复 20261021 ②）
+  let price = String(req.body.realPrice ?? '');
   price = price.replace(/,/g, '');
   req.body.realPrice = price;
   delete req.body.realPriceString;
@@ -512,25 +515,31 @@ router.post('/update', async (req, res) => {
         sqlList.push(public.getRoomDeceasedSyncSql(req.data.dataBase, idRoom));
 
         // 销带下葬并入下葬例程A统一维护管理期限(G1,口径同新建):排除被改 buried 取其余活动最早下葬日再并入本次下葬日(本次清空日期也会反映);有收款整链重排、无收款置 startDate=endDate=min 20261018 统一定义 20261018 G1 改造,
+        // 20261021 审查修复中C:读写一并收进同一事务(先锁墓位行),本事务内已插入/更新的 buried 行也会被链首取值读到,口径与新建一致,
         const excludeIdBuried = existing && existing.length > 0 ? existing[0].idBuried : null;
-        const minRows = excludeIdBuried !== null
-          ? await pool.query(
-              `select min(burialDate) as minBurial from ${req.data.dataBase}.buried where idRoom = ? and isDeleted = 0 and idBuried <> ?`,
-              [idRoom, excludeIdBuried],
-            )
-          : await pool.query(
-              `select min(burialDate) as minBurial from ${req.data.dataBase}.buried where idRoom = ? and isDeleted = 0`,
-              [idRoom],
-            );
-        const anchorDay = public.feeMinDay(
-          minRows && minRows.length > 0 ? minRows[0].minBurial : null,
-          burialDate,
-        );
-        const periodStatements = await public.applyFeePeriodRecascade(req.data.dataBase, idRoom, req.data.userName, anchorDay);
-        sqlList.push(...periodStatements);
+        sqlList.push(async (conn) => {
+          await public.lockFeeChainRoot(conn, req.data.dataBase, idRoom);
+          const minRows = excludeIdBuried !== null
+            ? await public.queryWith(
+                conn,
+                `select min(burialDate) as minBurial from ${req.data.dataBase}.buried where idRoom = ? and isDeleted = 0 and idBuried <> ?`,
+                [idRoom, excludeIdBuried],
+              )
+            : await public.queryWith(
+                conn,
+                `select min(burialDate) as minBurial from ${req.data.dataBase}.buried where idRoom = ? and isDeleted = 0`,
+                [idRoom],
+              );
+          const anchorDay = public.feeMinDay(
+            minRows && minRows.length > 0 ? minRows[0].minBurial : null,
+            burialDate,
+          );
+          await public.applyFeePeriodRecascadeTx(conn, req.data.dataBase, idRoom, req.data.userName, anchorDay);
+        });
       }
 
-      return public.Transaction(sqlList, res);
+      // 销售形态更新落 room.serialNo:走撞号兜底事务(同新建,审查修复 20261021 中B)
+      return public.TransactionWithSerialGuard(sqlList, res);
     } catch (error) {
       return public.handleQueryError(res, error);
     }
@@ -617,8 +626,11 @@ router.post('/update', async (req, res) => {
     sqlList.push(public.getUpdateByIdStatement(req.body));
 
     // 下葬变动统一维护管理期限(同下葬页修改):排除被改记录取其余最早下葬日再并入本次下葬日;无收款仅置 startDate/endDate=min,有收款整链重排 20261018 ⑤ 新增,
-    try {
-      const minRows = await pool.query(
+    // 20261021 审查修复中C:读写一并收进同一事务(先锁墓位行),
+    sqlList.push(async (conn) => {
+      await public.lockFeeChainRoot(conn, req.data.dataBase, idRoom);
+      const minRows = await public.queryWith(
+        conn,
         `select min(burialDate) as minBurial from ${req.data.dataBase}.buried where idRoom = ? and isDeleted = 0 and idBuried <> ?`,
         [idRoom, idBuried],
       );
@@ -626,11 +638,8 @@ router.post('/update', async (req, res) => {
         minRows && minRows.length > 0 ? minRows[0].minBurial : null,
         req.body.burialDate,
       );
-      const periodStatements = await public.applyFeePeriodRecascade(req.data.dataBase, idRoom, req.data.userName, anchorDay);
-      sqlList.push(...periodStatements);
-    } catch (error) {
-      return public.handleQueryError(res, error);
-    }
+      await public.applyFeePeriodRecascadeTx(conn, req.data.dataBase, idRoom, req.data.userName, anchorDay);
+    });
 
     const json = {
       table: req.data.dataBase + '.room',
@@ -665,7 +674,7 @@ router.post('/update', async (req, res) => {
           conditionParts.push('contactsPhone = ?');
           conditionParams.push(String(oldPhone).trim());
         }
-        sqlList.push(public.getUpdateByConditionStatement({
+        sqlList.push(public.getSoftDeleteByConditionStatement({
           table: req.data.dataBase + '.contacts',
           condition: { sql: conditionParts.join(' AND '), params: conditionParams },
           isDeleted: 1,
