@@ -1,9 +1,19 @@
-require('dotenv').config();
+require('dotenv').config({ quiet: true });
 
 const baseUrl = process.env.SMOKE_BASE_URL || `http://127.0.0.1:${process.env.PORT || 3000}`;
-const username = process.env.SMOKE_USERNAME || '13766891959';
-const password = process.env.SMOKE_PASSWORD || '1234';
+// 探测凭据不再内置默认值(审查修复 20261021 二轮 P2-20):原写法把真实手机号与口令写成兜底默认值,
+// 仓库/日志一旦外泄即等于凭据外泄,且任何人敲 npm run smoke 都会拿那个账号去登录(还有失败锁定副作用),
+// 现要求显式提供,缺失即拒绝执行并给出用法提示(只读类检查不需要写库,默认不开 mutation),
+const username = process.env.SMOKE_USERNAME || '';
+const password = process.env.SMOKE_PASSWORD || '';
 const runMutationCheck = process.env.SMOKE_RUN_MUTATION === '1';
+
+if (!username || !password) {
+  console.error(
+    '缺少探测凭据:请通过环境变量提供 SMOKE_USERNAME / SMOKE_PASSWORD(为避免凭据入库,本脚本不再提供默认账号),例如: SMOKE_USERNAME=xxx SMOKE_PASSWORD=yyy npm run smoke',
+  );
+  process.exit(1);
+}
 
 async function expectJson(response, label) {
   const text = await response.text();

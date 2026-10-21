@@ -107,9 +107,6 @@ router.get('/list', async (req, res) => {
     WHERE ${whereSql}`;
 
     try {
-        const countResults = await pool.query(countSql, params);
-        const total = countResults[0].total;
-
         // 销售日期范围与关键词已在上方改判 EXISTS,本页取数不再 JOIN sale/contacts:原写法一行墓位遇到多条活动销售会重复成多行,
         // 且 count 与本页的 JOIN 必须逐字一致才能对齐分页总数,拆开后单一 room 口径天然一致 20261021 改造,
         // 销售列(payerPhone/createDate/realPrice)与联系人列改相关子查询:仅对本页行按 idRoom 走 idx_sale_idRoom/idx_contacts_idRoom 取数,
@@ -129,8 +126,13 @@ router.get('/list', async (req, res) => {
     ORDER BY r.idRoom DESC
     LIMIT ? OFFSET ?`;
 
-        const results = await pool.query(dataSql, [...params, pageSize, (current - 1) * pageSize]);
-        return res.json({ code: 0, data: { list: results, total } });
+        // 总数短 TTL 复用并与取数并发发出(审查修复 20261021 二轮 P2-14):同一筛选条件下翻页时总数根本不会变,
+        // 而这条 COUNT(*) 在大表上是整片扫描;原写法串行等 count 返回才发数据查询,每页白多一个往返, 20261021 改造,
+        const [aggregate, results] = await Promise.all([
+            public.queryAggregate(pool.query, { database: dataBase, sql: countSql, params }),
+            pool.query(dataSql, [...params, pageSize, (current - 1) * pageSize]),
+        ]);
+        return res.json({ code: 0, data: { list: results, total: aggregate.total } });
     } catch (error) {
         return public.handleQueryError(res, error);
     }

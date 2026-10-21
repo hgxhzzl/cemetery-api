@@ -42,6 +42,9 @@ router.post('/insert', async (req, res) => {
     );
     // 坐标集合一次性建为 Set:待建坐标判定从 O(已有行数) 降为 O(1)
     const occupied = new Set((occupiedRows || []).map((item) => `${item.yNum}:${item.xNum}`));
+    // 待建行先攒成数组,再一次生成多值 INSERT(审查修复 20261021 二轮 P1-9):
+    // 原写法在双循环内逐行 await execWith,1000 个墓位就是 1000 次网络往返且全部串行,
+    const pendingRows = [];
 
     for (let i = json.yNum; i < json.yNumTo + 1; i++) {
       for (let j = json.xNum; j < json.xNumTo + 1; j++) {
@@ -61,9 +64,15 @@ router.post('/insert', async (req, res) => {
         if (insertPayload.xyNumber === undefined || insertPayload.xyNumber === null || insertPayload.xyNumber === '') {
           insertPayload.xyNumber = `${i}排${j}号`;
         }
-        await public.execWith(connection, [public.getInsertStatement(insertPayload)]);
+        pendingRows.push(insertPayload);
         summary.created += 1;
       }
+    }
+
+    // 同一批行的列集合由同一个 req.body 展开而来(结构一致),故可合并为多值语句;
+    // 每条语句仍是一个事务项,失败时整个事务一起回滚,与逐行写法的安全口径相同,
+    if (pendingRows.length > 0) {
+      await public.execWith(connection, public.getMultiRowInsertStatements({ table, payloads: pendingRows }));
     }
     // 返回本事务项自己执行的写入行数(withTransaction 不累计函数型事务项的影响行数)
     return summary.created;
@@ -123,6 +132,16 @@ router.post('/update', async (req, res) => {
     // 多条修改不更新编号，避免范围内墓位被覆写为同一编号 20260831 新增,
     delete updatePayload.xyNumber;
     updatePayload.operator = operator;
+
+    // 批量上限同样适用于范围修改(审查修复 20261021 二轮 P1-10):原写法这条 UPDATE 对跨度不作限制,
+    // 排/号从 1 填到 99999 相当于一条语句锁住并改写全库活动墓位,
+    // 事务时长、binlog 体量与行锁范围都不可控,超限直接 400 要求缩小范围分批提交,
+    const spanCount = (json.yNumTo - json.yNum + 1) * (json.xNumTo - json.xNum + 1);
+    if (spanCount > config.roomBatch.maxCreate) {
+      return res.status(400).json({
+        error: `单次修改墓位范围 ${spanCount} 个超过上限 ${config.roomBatch.maxCreate} 个，请缩小范围分批提交!`,
+      });
+    }
 
     try {
       // 改走公共语句构造：原手写 SET 把请求体键名与 table 直接插进 SQL（值参数化了但标识符裸拼，

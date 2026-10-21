@@ -71,9 +71,6 @@ router.get('/list', async (req, res) => {
     WHERE ${whereSql}`;
 
     try {
-        const countResults = await pool.query(countSql, params);
-        const total = countResults[0].total;
-
         // 规格列已从列表去掉:SELECT 一并不再取 r.specs,不留用不到的字段 20261011 修改,
         const dataSql = `SELECT b.idBuried, b.idRoom, r.region, r.park, r.xyNumber, r.roomType, b.deceased, b.deceasedIDCard, b.deathDate, b.burialDate,
     s.realPrice, s.createDate AS saleDate, b.contacts, b.contactsphone, b.remark, b.operator, b.createDate
@@ -84,9 +81,14 @@ router.get('/list', async (req, res) => {
     ${orderBySql}
     LIMIT ? OFFSET ?`;
 
-        const results = await pool.query(dataSql, [...params, pageSize, (current - 1) * pageSize]);
+        // 总数短 TTL 复用并与取数并发发出(审查修复 20261021 二轮 P2-14):同一筛选条件下翻页时总数不会变,
+        // 而本页取数带 park/sale 两个 JOIN 与多层排序,count 只需单表 JOIN,两者串行就是两个完整往返, 20261021 改造,
+        const [aggregate, results] = await Promise.all([
+            public.queryAggregate(pool.query, { database: req.data.dataBase, sql: countSql, params }),
+            pool.query(dataSql, [...params, pageSize, (current - 1) * pageSize]),
+        ]);
         // 分页结果：list 当前页数据，total 总记录数供前端滚动加载使用 20260912 新增
-        return res.json({ code: 0, data: { list: results, total } });
+        return res.json({ code: 0, data: { list: results, total: aggregate.total } });
     } catch (error) {
         return public.handleQueryError(res, error);
     }

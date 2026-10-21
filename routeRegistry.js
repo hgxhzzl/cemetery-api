@@ -99,11 +99,16 @@ const ownContactsScope = { table: 'contacts', idField: 'idContacts', idParam: 'i
 //   menu         - 需具备该菜单的 useMenu(整前缀或 at 指定的子路径)
 //   openPaths    - 配合 menu:该前缀下的这些子路径仅需登录(参照数据不能要求页面菜单权限)
 //   anyMenu      - 任一指命菜单具备 useMenu 即放行(业务页与对应查询页共用同一接口)
-//   queryDetail  - 配合 menu:查询前缀专用口径,详情取数路径按“任一详情页菜单”放行
+//   queryDetail  - 配合 menu 或 anyMenu:查询前缀专用口径,详情取数路径按“任一详情页菜单”放行
+//                  (详情路径名单见 rbac.DETAIL_AGGREGATE_ROUTES,本表与之双向对账,详见 auditRouteRegistry) 20261021 二轮 P1-3,
 //   platformOnly - 仅平台管理员(gm_data_000 租户账户)
 //   ownership    - 主键记录的区域归属校验;可单独出现(子路径归属校验,权限由同一条目的整前缀守卫担当),
 //                  也可与上面任一权限同时出现
 //   loginOnly    - 显式声明“仅需登录”,必须同时给出 reason(测试据此判定为有意豁免而非漏写)
+// 条目字段 innerGuards:声明“该条目的 router 文件内部自己 router.use 了一道守卫”(名称表见 INNER_GUARD_KINDS)。
+// 账户/账户权限五个 router 一直在文件顶部 router.use(rbac.requirePlatformAdmin),注册表条目却写着 loginOnly ——
+// 同一个接口存在两套彼此不可见的口径:删掉文件里那一行、或改掉条目里那一行,语法与用例都不会报错,
+// 现要求内部守卫必须在条目里显式登记,并由 router.stack 内省做双向对账(审查修复 20261021 二轮 P2-11),
 // 条目字段 loginOnlyWrites:声明“该条目的写接口(POST/PUT/DELETE)历史上就只要求登录”,
 // 必须写明理由;未声明的条目内出现未登记守卫的写接口会在启动时被 mountApiRoutes 拒绝,
 // 这样“新增接口漏一行守卫”从线上的无鉴权裸奔变成启动即失败(审查修复 20261021 P1-4),
@@ -156,26 +161,30 @@ const ROUTES = [
     guards: [{ at: '', menu: 'contract' }],
   },
 
-  // ==================== 账户(租户开户与资料,历史上仅要求登录) ====================
+  // ==================== 账户(租户开户与资料:仅平台管理员) ====================
+  // 权限口径实现在 account/*.js 文件顶部的 router.use(rbac.requirePlatformAdmin)(20260917 越权收口),
+  // 注册表此前把它记成 loginOnly,与实现不符;现按真实口径登记并由 innerGuards 对账钉住(二轮 P2-11),
+  // 双写(条目守卫 + router 内部)是有意的:行为不变,但口径在注册表里可见且互相对账,与 /api/device 同一手法,
   {
     path: '/api/account-save',
     router: accountSaveROutes,
-    note: '账户新建/修改/建库',
-    loginOnlyWrites: '账户开户为注册流程入口,历史口径即只要登录不校验菜单权限;若需收口为仅平台管理员,请显式改本条目守卫',
-    guards: [{ at: '', loginOnly: true, reason: '账户开户为注册流程入口,历史口径即只要登录不校验菜单权限;迁移注册表时保持不变' }],
+    note: '账户新建/修改/建库(仅平台管理员)',
+    innerGuards: ['platformAdmin'],
+    guards: [{ at: '', platformOnly: true }],
   },
   {
     path: '/api/account-query',
     router: accountQueryROutes,
-    note: '账户查询',
-    guards: [{ at: '', loginOnly: true, reason: '同上:账户接口历史仅要求登录,迁移时保持口径' }],
+    note: '账户查询(仅平台管理员)',
+    innerGuards: ['platformAdmin'],
+    guards: [{ at: '', platformOnly: true }],
   },
   {
     path: '/api/account-delete',
     router: accountDeleteROutes,
-    note: '账户注销(级联删除该租户操作员与授权)',
-    loginOnlyWrites: '账户接口历史仅要求登录,迁移时保持口径(收口为 platformOnly 需业务确认后再改)',
-    guards: [{ at: '', loginOnly: true, reason: '账户接口历史仅要求登录,迁移时保持口径(收口为 platformOnly 需业务确认后再改)' }],
+    note: '账户注销(级联删除该租户操作员与授权,仅平台管理员)',
+    innerGuards: ['platformAdmin'],
+    guards: [{ at: '', platformOnly: true }],
   },
 
   // ==================== 标签(菜单 102102 选择设置) ====================
@@ -418,8 +427,11 @@ const ROUTES = [
   {
     path: '/api/transferOut-query',
     router: transferOutQueryROutes,
-    note: '迁出记录取数(业务页与迁出查询页共用)',
-    guards: [{ at: '', anyMenu: ['transferOut', 'transferOutQuery'] }],
+    // 详情放行(二轮 P1-3):前端 useRoomDetail 并行拉的第七类即本前缀裸 /(按墓位查迁出记录),
+    // 此前只登记了 anyMenu 严格口径,仅有其它墓位菜单的操作员点详情会因这一路 403 使整个详情打不开;
+    // 同时补上 ownRoomScope:裸 / 只按 idRoom 取数,原口径缺归属校验,限定区域的操作员可读它区墓位的迁出记录,
+    note: '迁出记录取数(业务页与迁出查询页共用,含墓位详情迁出卡片)',
+    guards: [{ at: '', anyMenu: ['transferOut', 'transferOutQuery'], queryDetail: true, ownership: ownRoomScope }],
   },
   {
     path: '/api/transferOut-delete',
@@ -501,15 +513,16 @@ const ROUTES = [
   {
     path: '/api/accountPower-save',
     router: accountPowerSaveROutes,
-    note: '账户(租户)菜单权限保存',
-    loginOnlyWrites: '账户权限接口与账户接口同口径,历史仅要求登录;写口按账户自身身份生效',
-    guards: [{ at: '', loginOnly: true, reason: '账户权限接口与账户接口同口径,历史仅要求登录;写口按账户自身身份生效' }],
+    note: '账户(租户)菜单权限保存(仅平台管理员)',
+    innerGuards: ['platformAdmin'],
+    guards: [{ at: '', platformOnly: true }],
   },
   {
     path: '/api/accountPower-query',
     router: accountPowerQueryROutes,
-    note: '账户菜单权限读取',
-    guards: [{ at: '', loginOnly: true, reason: '同上' }],
+    note: '账户菜单权限读取(仅平台管理员)',
+    innerGuards: ['platformAdmin'],
+    guards: [{ at: '', platformOnly: true }],
   },
   {
     path: '/api/dashboard-query',
@@ -548,8 +561,8 @@ function assertGuardEntry(entry, guard) {
       throw new Error(`路由注册表守卫配置错误(${label}):无权限口径的守卫必须带 ownership 且指定非空 at`);
     }
   }
-  if (guard.queryDetail && !guard.menu) {
-    throw new Error(`路由注册表守卫配置错误(${label}):queryDetail 必须搭配 menu 使用`);
+  if (guard.queryDetail && !guard.menu && !guard.anyMenu) {
+    throw new Error(`路由注册表守卫配置错误(${label}):queryDetail 必须搭配 menu 或 anyMenu 使用`);
   }
   if (guard.openPaths && !guard.menu) {
     throw new Error(`路由注册表守卫配置错误(${label}):openPaths 必须搭配 menu 使用`);
@@ -573,7 +586,7 @@ function buildGuardMiddlewares(guard) {
     middlewares.push(rbac.requirePlatformAdmin);
   }
   if (guard.queryDetail) {
-    middlewares.push(rbac.requireQueryPowerWithDetail(guard.menu));
+    middlewares.push(rbac.requireQueryPowerWithDetail(guard.menu || guard.anyMenu));
   } else if (guard.anyMenu) {
     middlewares.push(rbac.requirePowerByAnyMenuName(...guard.anyMenu));
   } else if (guard.menu) {
@@ -593,6 +606,36 @@ function listRouterRoutes(router) {
       subPath: layer.route.path,
       methods: Object.keys(layer.route.methods).map((method) => method.toUpperCase()),
     }));
+}
+
+// 路由内部守卫的名称表(审查修复 20261021 二轮 P2-11):条目 innerGuards 写的是左边这种与实现无关的口径名,
+// 右边是它在 rbac 里的函数名;内省靠函数名比对(具名函数声明的 .name 不会被 require/导出搬运丢掉),
+// 只涵盖 router.use(fn) 形态;handler 体内自行判定的写法(如 device.js 的 requireAdmin)不在栈上、检测不到,
+// 那类口径必须由条目自己的 guards 声明承担(本机制的局限,已在注释里如实写明),
+const INNER_GUARD_KINDS = {
+  platformAdmin: 'requirePlatformAdmin',
+};
+const INNER_GUARD_NAMES = new Set(Object.values(INNER_GUARD_KINDS));
+
+// 内省一个 router 文件里自己 router.use 上去的守卫(返回已识别的口径名升序列表),
+function listRouterInnerGuards(router) {
+  const stack = (router && router.stack) || [];
+  const kinds = new Set();
+  stack.forEach((layer) => {
+    if (layer.route) {
+      return;
+    }
+    const handle = layer.handle;
+    if (typeof handle !== 'function' || !INNER_GUARD_NAMES.has(handle.name)) {
+      return;
+    }
+    Object.keys(INNER_GUARD_KINDS).forEach((kind) => {
+      if (INNER_GUARD_KINDS[kind] === handle.name) {
+        kinds.add(kind);
+      }
+    });
+  });
+  return [...kinds].sort();
 }
 
 // 写接口口径以方法定为准(而非路径名正则):P0-1 已将破坏性 GET 全部改为 POST,
@@ -619,6 +662,54 @@ function guardCoversRoute(guardMountPath, routeFullPath) {
 
 function guardHasRealPermission(guard) {
   return Boolean(guard.menu) || Boolean(guard.anyMenu) || Boolean(guard.platformOnly);
+}
+
+// 详情聚合放行名单与注册表逐项对账(审查修复 20261021 二轮 P1-3):两张表任一侧单独改动都会造成口径不一致 ——
+// 白名单登了前缀但该前缀没挂 queryDetail(详情仍打不开),或挂了 queryDetail 却无白名单条目(宽松口径泄向非详情路径),
+// 其中“白名单指向未挂载前缀”需要全表视角,故仅在体检真实注册表整体时运行(测试注入的 fixture 清单不含这些前缀,不应误报),
+// 反向两项逐条目即可判定,对 fixture 同样生效,保留给反向用例做“牙齿” 20261021 二轮调整,
+function auditDetailAggregateRoutes(routes, mountedPaths, isFullRegistry) {
+  const violations = [];
+  const detailRoutes = rbac.DETAIL_AGGREGATE_ROUTES || [];
+  const queryDetailPaths = new Set();
+  for (const entry of routes) {
+    for (const guard of entry.guards || []) {
+      if (guard.queryDetail) {
+        queryDetailPaths.add(normalizePath(entry.path));
+      }
+    }
+  }
+  const detailPrefixes = new Set(detailRoutes.map((rule) => normalizePath(rule.prefix)));
+  if (isFullRegistry) {
+    detailPrefixes.forEach((prefix) => {
+      if (!mountedPaths.has(prefix)) {
+        violations.push(`详情白名单指向未挂载的前缀:${prefix}`);
+      }
+      if (!queryDetailPaths.has(prefix)) {
+        violations.push(`详情白名单前缀未在注册表登记 queryDetail 守卫:${prefix}`);
+      }
+    });
+  }
+  queryDetailPaths.forEach((prefix) => {
+    if (!detailPrefixes.has(prefix)) {
+      violations.push(`挂了 queryDetail 的前缀没有对应的详情白名单条目:${prefix}`);
+    }
+  });
+  // 白名单里每个 prefix+path 必须真实存有一条 GET 路由,否则登记的是死路径(宽松口径永远不命中,排障时很难看出),
+  detailRoutes.forEach((rule) => {
+    const entry = routes.find((item) => normalizePath(item.path) === normalizePath(rule.prefix));
+    if (!entry) {
+      return;
+    }
+    const expectedPath = normalizePath(rule.prefix + rule.path);
+    const hasRoute = listRouterRoutes(entry.router).some(
+      (route) => route.methods.includes('GET') && normalizePath(entry.path + route.subPath) === expectedPath,
+    );
+    if (!hasRoute) {
+      violations.push(`详情白名单条目没有对应的 GET 路由:${rule.prefix}${rule.path}`);
+    }
+  });
+  return violations;
 }
 
 // 注册表体检:返回全部配置违规描述(空数组即合格)。启动与测试都跑这一套断言,
@@ -650,6 +741,22 @@ function auditRouteRegistry(routes = ROUTES) {
         violations.push(error.message);
       }
     }
+    // 路由内部守卫与条目 innerGuards 声明双向对账(二轮 P2-11):
+    // router 里 router.use 了一道已知守卫而条目没写 → 权限口径在注册表(唯一事实来源)里隐形,
+    // 条目写了却 router 里找不到 → 声明已与实际实现漂移(多半是内部那行被删了),两个方向都必须报错,
+    const declaredInner = Array.isArray(entry.innerGuards) ? entry.innerGuards.map((kind) => String(kind)) : [];
+    declaredInner
+      .filter((kind) => !Object.prototype.hasOwnProperty.call(INNER_GUARD_KINDS, kind))
+      .forEach((kind) => violations.push(`条目 ${entry.path} 声明了未知的 innerGuards:${kind}(名称表见 INNER_GUARD_KINDS)`));
+    const actualInner = listRouterInnerGuards(entry.router);
+    const undeclaredInner = actualInner.filter((kind) => !declaredInner.includes(kind));
+    if (undeclaredInner.length > 0) {
+      violations.push(`条目 ${entry.path} 的 router 内部存在未登记的守卫:${undeclaredInner.join(',')}(权限口径必须在注册表可见)`);
+    }
+    const ghostInner = declaredInner.filter((kind) => !actualInner.includes(kind));
+    if (ghostInner.length > 0) {
+      violations.push(`条目 ${entry.path} 声明的 innerGuards 在 router 内部并不存在:${ghostInner.join(',')}(口径已与实际实现漂移)`);
+    }
     for (const route of listRouterRoutes(entry.router)) {
       const routeFullPath = normalizePath(entry.path + route.subPath);
       const covered = guards.filter((guard) => guardCoversRoute(buildMountPath(entry.path, guard.at), routeFullPath));
@@ -662,6 +769,9 @@ function auditRouteRegistry(routes = ROUTES) {
       }
     }
   }
+  // 详情聚合放行名单与注册表逐项对账(审查修复 20261021 二轮 P1-3):需要对全表视角的部分只在体检真实注册表时运行,
+  // 其余反向对账对 fixture 清单也成立,详见 auditDetailAggregateRoutes 注释 20261021 新增,
+  violations.push(...auditDetailAggregateRoutes(routes, mountedPaths, routes === ROUTES));
   return violations;
 }
 
@@ -694,4 +804,10 @@ module.exports = {
   guardCoversRoute,
   normalizePath,
   buildMountPath,
+  // 导出供用例复用:详情聚合放行(P1-3)的矩阵用例必须跑注册表里真实的守卫条目,
+  // 而不是在测试里重抄一遍“先归属后菜单”的组装顺序,否则测试只能证明自己, 20261021 二轮新增,
+  buildGuardMiddlewares,
+  // 导出供用例与审计脚本内省路由内部守卫(二轮 P2-11),
+  listRouterInnerGuards,
+  INNER_GUARD_KINDS,
 };

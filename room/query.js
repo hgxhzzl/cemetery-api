@@ -38,7 +38,13 @@ router.get('/parkTree', async (req, res) => {
     const table = " SELECT region,park FROM " + db + ".v_region_park";
     // 区域→园区树同样按操作员区域名单收窄,与 /park-query/region、/park-query/park 同源口径,
     // 避开“下拉挡住了但树接口能拿到全区划”的不一致;未配区域/平台管理员返回全量 20261010 硬隔离,
-    const allowedRegions = await rbac.fetchOperatorRegions(req);
+    // 名单取数失败直接回 500:不能落到下方的视图兜底里去(那里空名单等于不过滤,会泄出全区划) 20261021 审查修复二轮 P1-4,
+    let allowedRegions;
+    try {
+        allowedRegions = await rbac.fetchOperatorRegions(req);
+    } catch (regionError) {
+        return public.handleQueryError(res, regionError);
+    }
     try {
         const results = await pool.query(table);
         return public.respondList(res, buildParkTree(rbac.filterByOperatorRegions(results, 'region', allowedRegions)));
@@ -83,19 +89,22 @@ router.get('/room', async (req, res) => {
   router.get('/canSale', async (req, res) => {
         // 可售墓位:返回全部记录(含已售),是否可售由前端根据 saleStatus 判断 20260916 修改,
         // 区域三级菜单进入时仅传区域不传园区，园区参数改为可选，为空时查该区域全部墓位 20260831 修改,
-        // LEFT JOIN 活动预定记录带出 liaison/liaisonPhone（预定页卡片“预定人/手机号”行使用），
-        // 一穴一条约束下子查询 MAX 兑底防历史数据重复行放大;销售页不消费这两列，属可忽略的额外字段 20261012 新增,
+        // 活动预定记录带出 liaison/liaisonPhone（预定页卡片“预定人/手机号”行使用），
+        // 一穴一条约束下取最新一条防历史数据重复行放大;销售页不消费这两列，属可忽略的额外字段 20261012 新增,
+        // 20261021 审查修复二轮 P1-8:改相关子查询取代 LEFT JOIN 派生表——带 GROUP BY 的派生表无法与外层合并,
+        // MySQL 每次请求都要先全表扫描 reserve 并落临时表再 JOIN,存量预定越多本页越慢;
+        // 改后只对本页墓位行按 idx_reserve_idRoom 取数,数百穴位即数百次索引 lookup,
         const conditions = ['r.isDeleted = 0', 'r.region = ?'];
         const params = [req.query.region];
         if (req.query.park) {
             conditions.push('r.park = ?');
             params.push(req.query.park);
         }
-        const sql = `SELECT r.*, rv.liaison AS reserveLiaison, rv.liaisonPhone AS reserveLiaisonPhone
+        // 同一穴位多条活动记录时取最新一条(原 MAX 写法取的是字典序最大值,无业务含义),
+        const latestReserve = (column) =>
+            `(SELECT rs.${column} FROM ${req.data.dataBase}.reserve rs WHERE rs.idRoom = r.idRoom AND rs.isDeleted = 0 ORDER BY rs.idReserve DESC LIMIT 1)`;
+        const sql = `SELECT r.*, ${latestReserve('liaison')} AS reserveLiaison, ${latestReserve('liaisonPhone')} AS reserveLiaisonPhone
             FROM ${req.data.dataBase}.room r
-            LEFT JOIN (SELECT idRoom, MAX(liaison) AS liaison, MAX(liaisonPhone) AS liaisonPhone
-                FROM ${req.data.dataBase}.reserve WHERE isDeleted = 0 GROUP BY idRoom) rv
-            ON rv.idRoom = r.idRoom
             WHERE ${conditions.join(' AND ')}`;
         try {
             const results = await pool.query(sql, params);

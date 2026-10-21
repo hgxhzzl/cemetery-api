@@ -4,6 +4,8 @@ const pool = require('../database');
 const public = require('../public');
 const rbac = require('../rbac');
 const loginState = require('../loginState');
+// 库名形态口径与登录/验签闸门同源(20261021 审查修复二轮 P0-1),
+const tenant = require('../tenant');
 module.exports = router;
 
 // 全局管理接口:账户增删改与建库仅平台管理员可操作 20260917 越权收口,
@@ -12,6 +14,11 @@ router.use(rbac.requirePlatformAdmin);
 router.post('/insert', async (req, res) => {
 
   public.normalizeBodyDates(req.body);
+  // 库名形态与登录/验签闸门同源(20261021 审查修复二轮 P0-1):account.dataBaseName 就是租户身份的源头,
+  // 写入一个不合法的名字既可能让该租户永远登录不了,也可能成为后续拼库名的载体,因此在入口直接拒,
+  if (!tenant.isValidNameShape(req.body.dataBaseName)) {
+    return res.status(400).json({ error: 'dataBaseName 不合法:仅允许小写字母开头的字母/数字/下划线(2-32 位)' });
+  }
   const sqlList = [];
   // 初始口令不再取手机号(登录名就是手机号,等于口令公开):提交值须过强度校验,缺省时服务端随机生成并一次性回显 20261021 审查修复 中E,
   const submittedPassword = req.body.password === undefined || req.body.password === null ? '' : String(req.body.password);
@@ -77,9 +84,9 @@ router.post('/update', async (req, res) => {
 
   const accountUpdate = { ...req.body };
   // 密码修改统一哈希存储,避免明文落库 20260915 安全改造,
-  // 已是bcrypt哈希时跳过,防止二次哈希导致登录失效 20260916 修复,
+  // 已是哈希值(bcrypt 存量或 scrypt 新版)时跳过,防止二次哈希导致登录失效 20260916 修复, 20261021 审查修复二轮 P1-6 调整,
   let passwordUpdated = false;
-  if (accountUpdate.password !== undefined && accountUpdate.password !== '' && !public.isBcryptHash(accountUpdate.password)) {
+  if (accountUpdate.password !== undefined && accountUpdate.password !== '' && !public.looksHashed(accountUpdate.password)) {
     accountUpdate.password = await public.hashPassword(accountUpdate.password);
     passwordUpdated = true;
   }
@@ -93,8 +100,12 @@ router.post('/update', async (req, res) => {
 
   // 账户口令被真正改动时作废它名下的活跃登录态:登录态以 operator.phone 为键,
   // 改完密码不让旧 token 继续有效 20261021 审查修复 P0-3,
-  if (passwordUpdated && req.body.dataBaseName) {
-    try {
+  // 20261021 审查修复二轮 P2-22:同样排到 commit 之后,避免事务回滚了却把人踢下线,
+  const onCommitted = () => {
+    if (!passwordUpdated || !req.body.dataBaseName) {
+      return;
+    }
+    (async () => {
       const phoneRows = await pool.query(
         'SELECT phone FROM gm_data_000.operator WHERE dataBaseName = ? AND isAccount = 1',
         [req.body.dataBaseName],
@@ -102,10 +113,10 @@ router.post('/update', async (req, res) => {
       for (const row of phoneRows || []) {
         await loginState.deleteActiveLogin(row.phone);
       }
-    } catch (error) {
+    })().catch((error) => {
       console.error('revoke login session failed:', error);
-    }
-  }
+    });
+  };
 
   if (req.body.dataBaseName) {
     const operatorUpdate = {
@@ -118,7 +129,7 @@ router.post('/update', async (req, res) => {
     if (req.body.phone !== undefined) {
       operatorUpdate.phone = req.body.phone;
     }
-    if (req.body.password !== undefined && req.body.password !== '' && !public.isBcryptHash(req.body.password)) {
+    if (req.body.password !== undefined && req.body.password !== '' && !public.looksHashed(req.body.password)) {
       // 密码修改统一哈希存储 20260915 安全改造,
       operatorUpdate.password = await public.hashPassword(req.body.password);
     }
@@ -137,14 +148,16 @@ router.post('/update', async (req, res) => {
     }
   }
 
-  return public.Transaction(sqlList,res);
+  return public.Transaction(sqlList,res, { onCommitted });
 
 });
 
 router.post('/createDataBase', async (req, res) => {
   const dataBaseName = req.body.dataBaseName;
-  if (!dataBaseName || !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(dataBaseName)) {
-    return res.status(400).json({ error: 'Invalid database name' });
+  // 库名形态统一走租户闸门同一口径(20261021 审查修复二轮 P0-1):本接口新建的库最终要能登录,
+  // 因此不允许出现“建得出库但闸门不认”的名字(如带大写/非法字符),
+  if (!tenant.isValidNameShape(dataBaseName)) {
+    return res.status(400).json({ error: '库名不合法:仅允许小写字母开头的字母/数字/下划线(2-32 位)' });
   }
 
   if (dataBaseName === 'gm_data_000') {

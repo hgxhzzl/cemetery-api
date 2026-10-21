@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const pool = require('../database');
 const public = require('../public');
+// 事务外的直接取数已全部收进事务项,本文件不再直接持有池(20261021 审查修复二轮 P0-2),
 module.exports = router;
 
 // 新建下葬:插入一条下葬记录并把墓位下葬状态直接置为已下葬;取消预定/核对/完成状态机 20260907 修改,
@@ -53,17 +53,20 @@ router.post('/insert', async (req, res) => {
   sqlList.push(public.getRoomDeceasedSyncSql(req.data.dataBase, idRoom));
 
   // 联系人同步:按 名/电话 匹配活动联系人,执行 更新电话/更新姓名/新增,并同步 room.contacts 聚合 20260916 新增,
-  try {
+  // 20261021 审查修复二轮 P0-2:原先在事务外的池上读联系人、再把生成的语句塞进事务,
+  // 两个请求同时提交同一墓位时双方都读不到对方未提交的行,会各插一条同名联系人;
+  // 现改为函数型事务项,锁读→算→写全部在本事务内完成,
+  sqlList.push(async (conn) => {
     const contactsStatements = await public.buildContactsSyncStatements(
-      req.data.dataBase, idRoom, contactsName, contactsPhone, contactsIDCard, req.data.userName,
+      req.data.dataBase, idRoom, contactsName, contactsPhone, contactsIDCard, req.data.userName, conn,
     );
-    if (contactsStatements.length > 0) {
-      sqlList.push(...contactsStatements);
-      sqlList.push(public.getRoomContactsSyncSql(req.data.dataBase, idRoom));
+    if (contactsStatements.length === 0) {
+      return 0;
     }
-  } catch (error) {
-    return public.handleQueryError(res, error);
-  }
+    const affected = await public.execWith(conn, contactsStatements);
+    await public.execWith(conn, [public.getRoomContactsSyncSql(req.data.dataBase, idRoom)]);
+    return affected;
+  });
 
   return public.Transaction(sqlList, res);
 });
@@ -85,18 +88,6 @@ router.post('/update', async (req, res) => {
   const contactsPhone = req.body.contactsphone !== undefined ? req.body.contactsphone : req.body.contactsPhone;
   const contactsIDCard = req.body.contactsIDCard;
 
-  // 修改前旧联系人:同步后不再被新值引用时用于软删旧记录 20260916 新增,
-  let oldContactsRow = null;
-  try {
-    const oldRows = await pool.query(
-      `select contacts, contactsphone from ${req.data.dataBase}.buried where idBuried = ? and isDeleted = 0 limit 1`,
-      [idBuried],
-    );
-    oldContactsRow = oldRows && oldRows.length > 0 ? oldRows[0] : null;
-  } catch (error) {
-    return public.handleQueryError(res, error);
-  }
-
   const sqlList = [];
   req.body.table = req.data.dataBase + '.buried';
   req.body.operator = req.data.userName;
@@ -105,6 +96,58 @@ router.post('/update', async (req, res) => {
   delete req.body.idBuried;
 
   const buriedStatement = public.getUpdateByIdStatement(req.body);
+
+  // 联系人同步:按 名/电话 匹配活动联系人,执行 更新电话/更新姓名/新增;
+  // 同步后旧联系人不再被新值引用(改名/清空)时,软删旧记录避免残留 20260916 新增,
+  // 20261021 审查修复二轮 P0-2:旧联系人快照与联系人匹配都改为事务内读(且排在 buried UPDATE 之前,
+  // 否则旧值被本次提交覆盖后就取不到了),避开并发提交时重复插联系人/漏软删,
+  sqlList.push(async (conn) => {
+    const oldRows = await public.queryWith(
+      conn,
+      `select contacts, contactsphone from ${req.data.dataBase}.buried where idBuried = ? and isDeleted = 0 limit 1 for update`,
+      [idBuried],
+    );
+    const oldContactsRow = oldRows && oldRows.length > 0 ? oldRows[0] : null;
+
+    let contactsChanged = false;
+    let affected = 0;
+    const contactsStatements = await public.buildContactsSyncStatements(
+      req.data.dataBase, idRoom, contactsName, contactsPhone, contactsIDCard, req.data.userName, conn,
+    );
+    if (contactsStatements.length > 0) {
+      affected += await public.execWith(conn, contactsStatements);
+      contactsChanged = true;
+    }
+
+    // 旧记录清理:新联系人名与旧名不同(含清空)时软删旧记录;
+    // 改名不改电话时同步语句已把旧记录改名为新值,此处按旧名匹配不到活动记录,不产生额外影响,
+    const oldContacts = oldContactsRow ? oldContactsRow.contacts : null;
+    const oldPhone = oldContactsRow ? oldContactsRow.contactsphone : null;
+    const oldContactsValid = oldContacts !== null && oldContacts !== undefined && String(oldContacts).trim() !== '';
+    const newName = contactsName === undefined || contactsName === null ? '' : String(contactsName).trim();
+    if (oldContactsValid && String(oldContacts).trim() !== newName) {
+      const conditionParts = ['idRoom = ?', 'contacts = ?', 'isDeleted = 0'];
+      const conditionParams = [idRoom, String(oldContacts).trim()];
+      if (oldPhone !== null && oldPhone !== undefined && String(oldPhone).trim() !== '') {
+        conditionParts.push('contactsPhone = ?');
+        conditionParams.push(String(oldPhone).trim());
+      }
+      affected += await public.execWith(conn, [public.getSoftDeleteByConditionStatement({
+        table: req.data.dataBase + '.contacts',
+        condition: { sql: conditionParts.join(' AND '), params: conditionParams },
+        isDeleted: 1,
+        operator: req.data.userName,
+      })]);
+      contactsChanged = true;
+    }
+
+    // 联系人发生变更时,统一同步 room.contacts 聚合 20260916 新增,
+    if (contactsChanged) {
+      affected += await public.execWith(conn, [public.getRoomContactsSyncSql(req.data.dataBase, idRoom)]);
+    }
+    return affected;
+  });
+
   sqlList.push(buriedStatement);
 
   // 下葬变动统一维护管理期限(⑤):排除被改记录取其余最早下葬日再并入本次新下葬日;无收款仅置 startDate/endDate=min,有收款整链重排 20261018 新增,
@@ -136,47 +179,7 @@ router.post('/update', async (req, res) => {
   // 安葬者聚合:活动下葬记录 deceased 空格分隔同步到 room.deceased 20260917 新增,
   sqlList.push(public.getRoomDeceasedSyncSql(req.data.dataBase, idRoom));
 
-  // 联系人同步:按 名/电话 匹配活动联系人,执行 更新电话/更新姓名/新增;
-  // 同步后旧联系人不再被新值引用(改名/清空)时,软删旧记录避免残留 20260916 新增,
-  try {
-    let contactsChanged = false;
-    const contactsStatements = await public.buildContactsSyncStatements(
-      req.data.dataBase, idRoom, contactsName, contactsPhone, contactsIDCard, req.data.userName,
-    );
-    if (contactsStatements.length > 0) {
-      sqlList.push(...contactsStatements);
-      contactsChanged = true;
-    }
-
-    // 旧记录清理:新联系人名与旧名不同(含清空)时软删旧记录;
-    // 改名不改电话时同步语句已把旧记录改名为新值,此处按旧名匹配不到活动记录,不产生额外影响,
-    const oldContacts = oldContactsRow ? oldContactsRow.contacts : null;
-    const oldPhone = oldContactsRow ? oldContactsRow.contactsphone : null;
-    const oldContactsValid = oldContacts !== null && oldContacts !== undefined && String(oldContacts).trim() !== '';
-    const newName = contactsName === undefined || contactsName === null ? '' : String(contactsName).trim();
-    if (oldContactsValid && String(oldContacts).trim() !== newName) {
-      const conditionParts = ['idRoom = ?', 'contacts = ?', 'isDeleted = 0'];
-      const conditionParams = [idRoom, String(oldContacts).trim()];
-      if (oldPhone !== null && oldPhone !== undefined && String(oldPhone).trim() !== '') {
-        conditionParts.push('contactsPhone = ?');
-        conditionParams.push(String(oldPhone).trim());
-      }
-      sqlList.push(public.getSoftDeleteByConditionStatement({
-        table: req.data.dataBase + '.contacts',
-        condition: { sql: conditionParts.join(' AND '), params: conditionParams },
-        isDeleted: 1,
-        operator: req.data.userName,
-      }));
-      contactsChanged = true;
-    }
-
-    // 联系人发生变更时,统一同步 room.contacts 聚合 20260916 新增,
-    if (contactsChanged) {
-      sqlList.push(public.getRoomContactsSyncSql(req.data.dataBase, idRoom));
-    }
-  } catch (error) {
-    return public.handleQueryError(res, error);
-  }
+  // 联系人同步与旧记录清理已上提到本路由开头的事务项内(20261021 审查修复二轮 P0-2),
 
   return public.Transaction(sqlList, res);
 });

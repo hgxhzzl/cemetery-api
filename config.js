@@ -1,4 +1,7 @@
-require('dotenv').config();
+// quiet: dotenv v17 默认会在每次加载时向 stdout 打一行“injected env … // tip: …”推广文案,
+// 本服务的启动日志与请求日志同流,这行会混进日志采集并被多次打印(每个 require('dotenv') 入口一次),
+// 现静默加载(不影响任何取值,旧版 dotenv 不认该选项也会安全忽略)(审查修复 20261021 二轮 P2-19),
+require('dotenv').config({ quiet: true });
 
 function toNumber(value, fallback) {
   const parsed = Number(value);
@@ -51,6 +54,20 @@ const config = {
     bodyLimit: process.env.BODY_LIMIT || '100kb',
     // 优雅停机等待在途请求的超时(毫秒),超时后强制退出,避免连接被长期占满导致进程杀不掉,
     shutdownTimeoutMs: toNumber(process.env.SHUTDOWN_TIMEOUT_MS, 10_000),
+    // gzip 压缩阈值字节(审查修复 20261021 二轮 P2-13):墓位/业务列表整行 JSON 动辄数百 KB,
+    // 全站此前没有任何压缩;小于该值的响应不压(反而多一次 CPU 与首字节延迟),
+    // GZIP_MIN_BYTES 可调,置 1 等于全部响应都压,置极大等于关闭,本服务不为此新增 compression 依赖(用 node 自带 zlib),
+    gzipMinBytes: toNumber(process.env.GZIP_MIN_BYTES, 1024),
+    // 传输层超时(审查修复 20261021 二轮 P2-23):本服务此前完全没设过 HTTP 超时,
+    // 默认 requestTimeout=300s 意味着一个发一半的慢请求(或 Slowloris 式只发头)可以占住连接五分钟,
+    // 三个阈值均按“本服务实际最慢的正常请求”取宽容量,均可环境变量覆盖;0 表示沿用 Node 默认值,
+    requestTimeoutMs: toNumber(process.env.HTTP_REQUEST_TIMEOUT_MS, 60_000),
+    headersTimeoutMs: toNumber(process.env.HTTP_HEADERS_TIMEOUT_MS, 15_000),
+    keepAliveTimeoutMs: toNumber(process.env.HTTP_KEEP_ALIVE_TIMEOUT_MS, 5_000),
+    // 慢请求告警阈值:本层无权中断已在数据库里执行的语句(那需要库侧 MAX_EXECUTION_TIME),
+    // 因此硬超时只管连接层(上面的三个阈值),超过该耗时的请求记一条带请求号的 warn 供排障,
+    // 与 database.js 的慢查询告警形成两层时间线(库侧慢语句 / 整条请求链路),
+    slowRequestMs: toNumber(process.env.SLOW_REQUEST_MS, 3_000),
   },
   // 登录设备白名单总开关:默认开启,环境变量 DEVICE_CHECK_ENABLED=false 时整体关闭回退 20260924 新增,
   deviceCheck: {
@@ -73,6 +90,10 @@ const config = {
   auth: {
     jwtSecret: process.env.JWT_SECRET,
     tokenExpiresIn: process.env.JWT_EXPIRES_IN || '12h',
+    // 活跃登录态校验缓存时长(审查修复 20261021 二轮 P1-5):原口径每个带 token 的请求都要查一次
+    // login_session,现按此 TTL 缓存“活跃”结论;登出/改密会主动失效本实例缓存,
+    // 多实例部署时其他实例最多延后这么久生效,SESSION_CHECK_CACHE_MS 可调(0 等于关闭缓存),
+    sessionCheckCacheMs: toNumber(process.env.SESSION_CHECK_CACHE_MS, 5000),
   },
   database: {
     host: process.env.MYSQL_HOST || process.env.DB_HOST,
@@ -88,6 +109,10 @@ const config = {
       queueLimit: toNumber(process.env.DB_POOL_QUEUE_LIMIT, 200),
       connectTimeout: toNumber(process.env.DB_CONNECT_TIMEOUT_MS, 10_000),
       slowQueryMs: toNumber(process.env.SLOW_QUERY_MS, 500),
+      // 分页总数复用时长毫秒(审查修复 20261021 二轮 P2-14):同一筛选条件下翻页时总数不变,
+      // 而原口径每页都要重跑一次 COUNT(*)(销售/收款查询还附带 SUM),大表上是整片扫描;
+      // 现按「库名 + 语句 + 参数」缓存该结果并在任何写语句时主动作废对应库的条目,0 等于关闭,
+      countCacheMs: toNumber(process.env.COUNT_CACHE_MS, 10_000),
     },
   },
   securityWarnings: security.warnings,

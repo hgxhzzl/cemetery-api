@@ -103,14 +103,19 @@ router.get('/expired-list', async (req, res) => {
     const whereSql = conditions.join(' AND ');
 
     try {
-        const countResults = await pool.query('SELECT COUNT(*) AS total FROM ' + db + '.room r WHERE ' + whereSql, params);
+        const countSql = 'SELECT COUNT(*) AS total FROM ' + db + '.room r WHERE ' + whereSql;
         const dataSql = 'SELECT r.idRoom, r.region, r.park, r.xyNumber, DATE_FORMAT(r.endDate, \'%Y-%m-%d\') AS endDate, r.contacts ' +
             'FROM ' + db + '.room r WHERE ' + whereSql + ' ' +
             'ORDER BY r.endDate DESC, r.idRoom DESC ' +
             'LIMIT ? OFFSET ?';
-        const results = await pool.query(dataSql, [...params, pageSize, (current - 1) * pageSize]);
+        // 总数短 TTL 复用并与取数并发发出(审查修复 20261021 二轮 P2-14):首页卡片滚动加载同一筛选条件下
+        // 逐页拉取,而这条 COUNT(*) 要扫全部到期墓位;原写法串行两段每翻一页白等一个往返, 20261021 改造,
+        const [aggregate, results] = await Promise.all([
+            public.queryAggregate(pool.query, { database: db, sql: countSql, params }),
+            pool.query(dataSql, [...params, pageSize, (current - 1) * pageSize]),
+        ]);
         // 分页结果：list 当前页数据，total 总记录数供卡片标题条数展示与滚动加载判断 20260926 新增
-        return res.json({ code: 0, data: { list: results, total: countResults[0].total } });
+        return res.json({ code: 0, data: { list: results, total: aggregate.total } });
     } catch (error) {
         return public.handleQueryError(res, error);
     }
@@ -148,15 +153,20 @@ router.get('/reserve-list', async (req, res) => {
     const fromSql = ` FROM ${db}.reserve rv JOIN ${db}.room r ON rv.idRoom = r.idRoom WHERE ${whereSql}`;
 
     try {
-        const countResults = await pool.query(`SELECT COUNT(*) AS total${fromSql}`, params);
+        const countSql = `SELECT COUNT(*) AS total${fromSql}`;
         // 预定限期取 reserve 本表列(墓位 room.reservationExpireDate 只是同步副本);联系人取 liaison/liaisonPhone 20261011 新增,
         const dataSql = `SELECT rv.idReserve, r.region, r.park, r.xyNumber,
             DATE_FORMAT(rv.reservationExpireDate, '%Y-%m-%d') AS reservationExpireDate,
             rv.liaison AS contacts, rv.liaisonPhone AS contactsphone${fromSql}
             ORDER BY rv.reservationExpireDate ASC, rv.idReserve ASC
             LIMIT ? OFFSET ?`;
-        const results = await pool.query(dataSql, [...params, pageSize, (current - 1) * pageSize]);
-        return res.json({ code: 0, data: { list: results, total: countResults[0].total } });
+        // 总数短 TTL 复用并与取数并发发出(审查修复 20261021 二轮 P2-14):首页预定卡片逐页滚动时
+        // 活动预定集合基本不变,而这条 COUNT(*) 要 JOIN reserve 与 room 两表, 20261021 改造,
+        const [aggregate, results] = await Promise.all([
+            public.queryAggregate(pool.query, { database: db, sql: countSql, params }),
+            pool.query(dataSql, [...params, pageSize, (current - 1) * pageSize]),
+        ]);
+        return res.json({ code: 0, data: { list: results, total: aggregate.total } });
     } catch (error) {
         return public.handleQueryError(res, error);
     }

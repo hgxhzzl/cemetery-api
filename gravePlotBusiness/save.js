@@ -14,16 +14,9 @@ module.exports = router;
 // 联系人同步口径统一复用 public.buildContactsSyncStatements(与下葬/收管理费页同源),
 // 旧本地副本与其逐行同构,已删除避免双处维护产生偏差 20261019 重复代码消除,
 
-// 下葬形态通用:清理非 buried 表字段(前端统一业务模型按形态在后端拆分) 20260923 新增,
-function stripBuriedBody(req) {
-  delete req.body.payer;
-  delete req.body.payerPhone;
-  delete req.body.payerIDCard;
-  delete req.body.realPrice;
-  delete req.body.realPriceString;
-  delete req.body.payee;
-  delete req.body.serialNo;
-}
+// 各形态的入参剔除/捕获清单已抽到 lib/gravePlotBody.js(经 public 门面再导出):
+// 新建与修改两个 handler 原先各抄一份完全相同的 delete 块(共 6 处),抽为单一事实来源
+// (审查修复 20261021 二轮 P2-15),
 
 // 销售编号区内唯一校验:查同 region 是否已有其它墓位(含软删——编号一经发出永不复用)占用该编号,返回占用者 idRoom,无则 null 20261012 新增,
 // 编号空间为整个区域(region),与取号接口同源;空编号/查不到墓位区域时不校验(交由后续流程) 20261012 新增,
@@ -56,28 +49,8 @@ router.post('/insert', async (req, res) => {
   // 销售形态:落 sale 表,同步 room 置已销售+buyer/serialNo,付款人非空时同步新增 contacts 联系人,
   // 并向 buried 新增一条下葬记录(安葬者三字段+购墓人映射,同事务,不联动下葬状态机) 20260923 修改,
   if (type === 'sale') {
-    // 安葬者三字段属 buried 表,先捕获供 buried 插入,避免混入 sale 插入字段 20260923 新增;死亡日期同为 buried 列一并捕获 20261011 新增,
-    const deceased = req.body.deceased;
-    const deathDate = req.body.deathDate;
-    const burialDate = req.body.burialDate;
-    const deceasedIDCard = req.body.deceasedIDCard;
-    const deceasedRelation = req.body.deceasedRelation;
-    delete req.body.deceased;
-    delete req.body.deathDate;
-    delete req.body.burialDate;
-    delete req.body.deceasedIDCard;
-    delete req.body.deceasedRelation;
-
-    // sale 表无联系人列,剔除前端随单提交的联系人字段,联系人由下方 contacts 表语句单独同步 20260924 修复,
-    delete req.body.contacts;
-    delete req.body.contactsphone;
-    delete req.body.contactsPhone;
-    delete req.body.contactsIDCard;
-
-    const payer = req.body.payer;
-    const payerPhone = req.body.payerPhone;
-    const payerIDCard = req.body.payerIDCard;
-    const serialNo = req.body.serialNo;
+    // 安葬者五字段属 buried 表、联系人四字段属 contacts 表,先捕获并从 sale 写入字段中剔除 20260923 新增 20261011 补充死亡日期,
+    const { deceased, deathDate, burialDate, deceasedIDCard, deceasedRelation, payer, payerPhone, payerIDCard, serialNo } = public.captureSaleFormFields(req.body);
 
     // 新建销售编号区内唯一校验:同区域已被其它墓位占用则拒绝保存并提示 20261012 新增,
     try {
@@ -121,11 +94,8 @@ router.post('/insert', async (req, res) => {
 
     req.body.table = req.data.dataBase + '.sale';
     req.body.operator = req.data.userName;
-    // 守卫化取值：原 req.body.realPrice.toString() 在缺字段时抛 TypeError，async handler 内无人接住会崩进程（审查修复 20261021 ②）
-    let price = String(req.body.realPrice ?? '');
-    price = price.replace(/,/g, '');
-    req.body.realPrice = price;
-    delete req.body.realPriceString;
+    // 金额去千分位逗号并剔除展示用的 realPriceString(守卫化取值:原写法在缺字段时抛 TypeError 会崩进程) 20261021 审查修复②,
+    public.normalizePriceField(req.body);
     delete req.body.idBusiness;
 
     var sql = public.getInsertStatement(req.body);
@@ -141,11 +111,11 @@ router.post('/insert', async (req, res) => {
         VALUES (?, @idSale, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       // deathDate 可空:前端未选时 normalizeBodyDates 已将空串转 null,键缺失时兼容为 null(不可直传 undefined,mysql2 绑定 undefined 会报错) 20261011 新增,
       params: [idRoom, deceased,
-        deathDate === undefined || deathDate === null ? null : deathDate,
+        public.blankToNull(deathDate),
         burialDate, deceasedIDCard, deceasedRelation,
-        payer === undefined || payer === null ? '' : payer,
-        payerPhone === undefined || payerPhone === null ? '' : payerPhone,
-        payerIDCard === undefined || payerIDCard === null ? '' : payerIDCard,
+        public.blankToEmpty(payer),
+        public.blankToEmpty(payerPhone),
+        public.blankToEmpty(payerIDCard),
         req.data.userName, buriedDate, buriedDate],
     });
     // room.deceased 聚合同步:活动下葬记录 deceased 空格分隔同步到 room.deceased(逻辑同下葬页新增),随事务一致 20260923 新增,
@@ -156,8 +126,8 @@ router.post('/insert', async (req, res) => {
     json.idfield = 'idRoom';
     json.idvalue = idRoom;
     json.saleStatus = 'statusType.saleStatusEnum.sold';
-    json.buyer = payer === undefined || payer === null ? '' : payer;
-    json.serialNo = serialNo === undefined || serialNo === null ? '' : serialNo;
+    json.buyer = public.blankToEmpty(payer);
+    json.serialNo = public.blankToEmpty(serialNo);
     // 销售成交：预定信息整体清除——墓位预定状态复位为未预定（与新删除的 reserve 记录一致，避免墓位查询按已预定过滤误计）20261017 新增,
     json.reserveStatus = 'statusType.reserveStatusEnum.unreserved';
     // 销售成交：预定限期副本置空（room.reservationExpireDate = null，对应预定记录随下方软删一并清除）20261017 新增,
@@ -174,8 +144,7 @@ router.post('/insert', async (req, res) => {
     }));
 
     // 下葬日期非空时置墓位已下葬状态(销带下葬场景补齐) 20261004 新增;管理期限并入下葬例程A统一维护(G1),不再走"有收款就不动"旧口径 20261018 调整,
-    const burialDateValid = burialDate !== undefined && burialDate !== null && String(burialDate).trim() !== '';
-    if (burialDateValid) {
+    if (public.hasFilledValue(burialDate)) {
       sqlList.push({
         sql: `update ${req.data.dataBase}.room set intoStatus = ? where idRoom = ?`,
         params: ['statusType.intoStatusEnum.buried', idRoom],
@@ -197,13 +166,13 @@ router.post('/insert', async (req, res) => {
       });
     }
 
-    if (payer !== undefined && payer !== null && String(payer).trim() !== '') {
+    if (public.hasFilledValue(payer)) {
       const contactsJson = {
         table: req.data.dataBase + '.contacts',
         idRoom,
         contacts: payer,
-        contactsPhone: payerPhone === undefined || payerPhone === null ? '' : payerPhone,
-        contactsIDCard: payerIDCard === undefined || payerIDCard === null ? '' : payerIDCard,
+        contactsPhone: public.blankToEmpty(payerPhone),
+        contactsIDCard: public.blankToEmpty(payerIDCard),
         operator: req.data.userName,
       };
       sqlList.push(public.getInsertStatement(contactsJson));
@@ -217,33 +186,20 @@ router.post('/insert', async (req, res) => {
   // 预定形态:落 reserve 表(联系人/电话映射 liaison/liaisonPhone),同步 room 只置已预定(销售状态不动,同预定登记);
   // 同样一穴一条,该墓位已有预定记录则复用原行 20260923 修改, 20261011 改为一穴一条,
   if (type === 'reserve') {
-    req.body.liaison = req.body.payer;
-    req.body.liaisonPhone = req.body.payerPhone;
-    delete req.body.payer;
-    delete req.body.payerPhone;
-    delete req.body.realPrice;
-    delete req.body.realPriceString;
-    delete req.body.payerIDCard;
-    delete req.body.payee;
-    delete req.body.serialNo;
-    delete req.body.deceased;
-    delete req.body.burialDate;
-    delete req.body.deceasedIDCard;
-    delete req.body.deceasedRelation;
+    // 付款人字段映射为 reserve 的 liaison 列并剔除 reserve 没有的业务列(与修改分支共用同一函数),
+    public.prepareReserveFormBody(req.body, false);
     delete req.body.idBusiness;
 
     req.body.table = req.data.dataBase + '.reserve';
     req.body.operator = req.data.userName;
 
     // 一穴一条:复用该墓位已有预定记录(含已取消的历史行),不另新增第二条;与预定登记页共用同一辅助函数 20261011 修改,
-    let reserveWrite;
-    try {
-      reserveWrite = await public.buildReserveUpsertStatements(req.data.dataBase, idRoom, req.body);
-    } catch (error) {
-      return public.handleQueryError(res, error);
-    }
-
-    const sqlList = [...reserveWrite.statements];
+    // 20261021 审查修复二轮 P0-2:与预定登记页同口径改为事务内锁读(“查已有行→复用/新增”不再跑在事务外),
+    const sqlList = [];
+    sqlList.push(async (conn) => {
+      const reserveWrite = await public.buildReserveUpsertStatements(req.data.dataBase, idRoom, req.body, conn);
+      return public.execWith(conn, reserveWrite.statements);
+    });
     const json = {
       table: req.data.dataBase + '.room',
       operator: req.data.userName,
@@ -266,7 +222,7 @@ router.post('/insert', async (req, res) => {
     const contactsPhone = req.body.contactsphone !== undefined ? req.body.contactsphone : req.body.contactsPhone;
     const contactsIDCard = req.body.contactsIDCard;
 
-    stripBuriedBody(req);
+    public.stripBuriedFormFields(req.body);
     // 安葬者三字段属 buried 表,保留直接写入(此前误删致记录丢失,同下葬页) 20260924 修复
     delete req.body.idBusiness;
 
@@ -302,17 +258,18 @@ router.post('/insert', async (req, res) => {
 
     sqlList.push(public.getRoomDeceasedSyncSql(req.data.dataBase, idRoom));
 
-    try {
+    // 20261021 审查修复二轮 P0-2:联系人同步的读→算→写一并收进事务项(同下葬页新建),
+    sqlList.push(async (conn) => {
       const contactsStatements = await public.buildContactsSyncStatements(
-        req.data.dataBase, idRoom, contactsName, contactsPhone, contactsIDCard, req.data.userName,
+        req.data.dataBase, idRoom, contactsName, contactsPhone, contactsIDCard, req.data.userName, conn,
       );
-      if (contactsStatements.length > 0) {
-        sqlList.push(...contactsStatements);
-        sqlList.push(public.getRoomContactsSyncSql(req.data.dataBase, idRoom));
+      if (contactsStatements.length === 0) {
+        return 0;
       }
-    } catch (error) {
-      return public.handleQueryError(res, error);
-    }
+      const affected = await public.execWith(conn, contactsStatements);
+      await public.execWith(conn, [public.getRoomContactsSyncSql(req.data.dataBase, idRoom)]);
+      return affected;
+    });
 
     return public.Transaction(sqlList, res);
   }
@@ -342,17 +299,8 @@ router.post('/insert', async (req, res) => {
 
   // 安葬证设置形态:落 burial_cert 表,仅插入本表不联动(参照墓位销售方式,字段先行清理) 20260927 新增,
   if (type === 'certificate') {
-    delete req.body.payer;
-    delete req.body.payerPhone;
-    delete req.body.payerIDCard;
-    delete req.body.realPrice;
-    delete req.body.realPriceString;
-    delete req.body.payee;
-    delete req.body.deceased;
-    delete req.body.deceasedIDCard;
-    delete req.body.contacts;
-    delete req.body.contactsphone;
-    delete req.body.contactsIDCard;
+    // 仅落 burial_cert 本表,业务侧字段一律剔除(与修改分支共用同一函数),
+    public.prepareCertificateFormBody(req.body, false);
     delete req.body.idBusiness;
 
     req.body.table = req.data.dataBase + '.burial_cert';
@@ -363,20 +311,11 @@ router.post('/insert', async (req, res) => {
   }
 
   // 默认(业务形态):仅插入本业务表,不联动 room 状态与 contacts 20260923 新增,
-  delete req.body.deceased;
-  delete req.body.burialDate;
-  delete req.body.deceasedIDCard;
-  delete req.body.deceasedRelation;
-  delete req.body.contacts;
-  delete req.body.contactsphone;
-  delete req.body.contactsIDCard;
+  public.stripDefaultFormFields(req.body);
   req.body.table = req.data.dataBase + '.graveplotbusiness';
   req.body.operator = req.data.userName;
-  // 守卫化取值：同上，缺 realPrice 时原实现直接崩进程（审查修复 20261021 ②）
-  let price = String(req.body.realPrice ?? '');
-  price = price.replace(/,/g, '');
-  req.body.realPrice = price;
-  delete req.body.realPriceString;
+  // 金额去千分位逗号并剔除展示列(守卫化取值同上,缺 realPrice 时原实现直接崩进程) 20261021 审查修复②,
+  public.normalizePriceField(req.body);
   delete req.body.idBusiness;
 
   var sql = public.getInsertStatement(req.body);
@@ -398,28 +337,8 @@ router.post('/update', async (req, res) => {
       return res.status(400).json({ error: 'idBusiness参数错误!' });
     }
 
-    // 安葬者三字段属 buried 表,先捕获供 buried 同步,避免混入 sale 更新字段 20260923 新增;死亡日期同为 buried 列一并捕获 20261011 新增,
-    const deceased = req.body.deceased;
-    const deathDate = req.body.deathDate;
-    const burialDate = req.body.burialDate;
-    const deceasedIDCard = req.body.deceasedIDCard;
-    const deceasedRelation = req.body.deceasedRelation;
-    delete req.body.deceased;
-    delete req.body.deathDate;
-    delete req.body.burialDate;
-    delete req.body.deceasedIDCard;
-    delete req.body.deceasedRelation;
-
-    // sale 表无联系人列,剔除前端随单提交的联系人字段,联系人由下方 contacts 表语句单独同步 20260924 修复,
-    delete req.body.contacts;
-    delete req.body.contactsphone;
-    delete req.body.contactsPhone;
-    delete req.body.contactsIDCard;
-
-    const payer = req.body.payer;
-    const payerPhone = req.body.payerPhone;
-    const payerIDCard = req.body.payerIDCard;
-    const serialNo = req.body.serialNo;
+    // 安葬者五字段与联系人四字段的捕获/剔除口径与新建逐字一致(原先两处各写一份),
+    const { deceased, deathDate, burialDate, deceasedIDCard, deceasedRelation, payer, payerPhone, payerIDCard, serialNo } = public.captureSaleFormFields(req.body);
 
     req.body.table = req.data.dataBase + '.sale';
     req.body.operator = req.data.userName;
@@ -443,17 +362,17 @@ router.post('/update', async (req, res) => {
         return res.status(400).json({ error: '编号"' + String(serialNo).trim() + '"在本区域已被占用，请修改后再保存!' });
       }
 
-      const newPayerValid = payer !== undefined && payer !== null && String(payer).trim() !== '';
+      const newPayerValid = public.hasFilledValue(payer);
       const oldPayer = row ? row.oldPayer : null;
-      const oldPayerValid = oldPayer !== undefined && oldPayer !== null && String(oldPayer).trim() !== '';
+      const oldPayerValid = public.hasFilledValue(oldPayer);
 
       if (newPayerValid && idRoom !== null && oldPayerValid) {
         const contactsJson = {
           table: req.data.dataBase + '.contacts',
           condition: { sql: 'idRoom = ? AND contacts = ? AND isDeleted = 0', params: [idRoom, oldPayer] },
           contacts: payer,
-          contactsPhone: payerPhone === undefined || payerPhone === null ? '' : payerPhone,
-          contactsIDCard: payerIDCard === undefined || payerIDCard === null ? '' : payerIDCard,
+          contactsPhone: public.blankToEmpty(payerPhone),
+          contactsIDCard: public.blankToEmpty(payerIDCard),
           operator: req.data.userName,
         };
         sqlList.push(public.getUpdateByConditionStatement(contactsJson));
@@ -464,8 +383,8 @@ router.post('/update', async (req, res) => {
         const roomJson = {
           table: req.data.dataBase + '.room',
           condition: { sql: 'idRoom = ? AND isDeleted = 0', params: [idRoom] },
-          buyer: payer === undefined || payer === null ? '' : payer,
-          serialNo: serialNo === undefined || serialNo === null ? '' : serialNo,
+          buyer: public.blankToEmpty(payer),
+          serialNo: public.blankToEmpty(serialNo),
           operator: req.data.userName,
         };
         sqlList.push(public.getUpdateByConditionStatement(roomJson));
@@ -481,25 +400,22 @@ router.post('/update', async (req, res) => {
           [idRoom, idSale],
         );
         const buriedJson = {
-          deceased: deceased === undefined || deceased === null ? '' : deceased,
-          // 死亡日期可空:置 null 而非 ''(与其他字段不同——datetime 写空串在严格模式下会被 MySQL 拒),未填即抹空该列 20261011 新增,
-          deathDate: deathDate === undefined || deathDate === null ? null : deathDate,
-          // 下葬日期置 null 而非 ''(与死亡日期同口径):库列 datetime 在 sql_mode=STRICT_TRANS_TABLES 下写空串会直接报错,
-          // 销售形态下葬日期本身非必填,留空提交应当落 NULL 而不是抛 500 20261011 修复,
-          burialDate: burialDate === undefined || burialDate === null ? null : burialDate,
-          deceasedIDCard: deceasedIDCard === undefined || deceasedIDCard === null ? '' : deceasedIDCard,
-          deceasedRelation: deceasedRelation === undefined || deceasedRelation === null ? '' : deceasedRelation,
-          contacts: payer === undefined || payer === null ? '' : payer,
-          contactsphone: payerPhone === undefined || payerPhone === null ? '' : payerPhone,
-          contactsIDCard: payerIDCard === undefined || payerIDCard === null ? '' : payerIDCard,
+          deceased: public.blankToEmpty(deceased),
+          // 死亡/下葬日期可空:置 null 而非 ''(与其他字段不同——datetime 写空串在 sql_mode=STRICT_TRANS_TABLES 下会被 MySQL 拒),未填即抹空该列 20261011 新增/修复,
+          deathDate: public.blankToNull(deathDate),
+          burialDate: public.blankToNull(burialDate),
+          deceasedIDCard: public.blankToEmpty(deceasedIDCard),
+          deceasedRelation: public.blankToEmpty(deceasedRelation),
+          contacts: public.blankToEmpty(payer),
+          contactsphone: public.blankToEmpty(payerPhone),
+          contactsIDCard: public.blankToEmpty(payerIDCard),
           operator: req.data.userName,
         };
-        // 判定“本次填写了安葬信息”改为逐项判非空且非 null:burialDate 空值已由 '' 调为 null,
-        // 而 String(null).trim() 得到 'null' 属非空串,沿用旧写法会使本判定恒为真、在无活动记录时误补插 20261011 修复,
-        const hasBuriedValue = (value) => value !== undefined && value !== null && String(value).trim() !== '';
-        const hasBuriedInfo = hasBuriedValue(buriedJson.deceased)
-          || hasBuriedValue(buriedJson.burialDate)
-          || hasBuriedValue(buriedJson.deceasedIDCard);
+        // 判定“本次填写了安葬信息”逐项判非 undefined/非 null/非空串:null 直接 String(null).trim() 会得到 'null' 属非空,
+        // 沿用旧写法会使本判定恒为真、在无活动记录时误补插 20261011 修复(口径收进 public.hasFilledValue),
+        const hasBuriedInfo = public.hasFilledValue(buriedJson.deceased)
+          || public.hasFilledValue(buriedJson.burialDate)
+          || public.hasFilledValue(buriedJson.deceasedIDCard);
         if (existing && existing.length > 0) {
           buriedJson.table = buriedTable;
           buriedJson.idfield = 'idBuried';
@@ -552,24 +468,8 @@ router.post('/update', async (req, res) => {
       return res.status(400).json({ error: 'idBusiness参数错误!' });
     }
 
-    req.body.liaison = req.body.payer;
-    req.body.liaisonPhone = req.body.payerPhone;
-    delete req.body.payer;
-    delete req.body.payerPhone;
-    delete req.body.realPrice;
-    delete req.body.realPriceString;
-    delete req.body.payerIDCard;
-    delete req.body.payee;
-    delete req.body.serialNo;
-    delete req.body.deceased;
-    delete req.body.burialDate;
-    delete req.body.deceasedIDCard;
-    delete req.body.deceasedRelation;
-    delete req.body.contacts;
-    delete req.body.contactsphone;
-    delete req.body.contactsIDCard;
-    // 墓位不变,无需更新外键 idRoom:限期副本同步由 idReserve 反查所属墓位,不依赖该参数 20261011 修改,
-    delete req.body.idRoom;
+    // 与新建同一函数:墓位不变所以不更新外键 idRoom,并额外剔除联系人三字段 20261011 修改,
+    public.prepareReserveFormBody(req.body, true);
 
     req.body.table = req.data.dataBase + '.reserve';
     req.body.operator = req.data.userName;
@@ -601,19 +501,56 @@ router.post('/update', async (req, res) => {
     const contactsIDCard = req.body.contactsIDCard;
 
     // 修改前旧联系人:同步后不再被新值引用时用于软删旧记录 20260923 新增,
-    let oldContactsRow = null;
-    try {
-      const oldRows = await pool.query(
-        `select contacts, contactsphone from ${req.data.dataBase}.buried where idBuried = ? and isDeleted = 0 limit 1`,
+    // 20261021 审查修复二轮 P0-2:该快照与下面的联系人匹配原本都跑在事务外的池上、语句却排进本事务,
+    // 并发提交同一墓位时会重复插联系人与漏软删;现合并为一个事务项,并排在 buried UPDATE 之前
+    // (旧值一旦被本次提交覆盖就取不到了),
+    const sqlList = [];
+    sqlList.push(async (conn) => {
+      const oldRows = await public.queryWith(
+        conn,
+        `select contacts, contactsphone from ${req.data.dataBase}.buried where idBuried = ? and isDeleted = 0 limit 1 for update`,
         [idBuried],
       );
-      oldContactsRow = oldRows && oldRows.length > 0 ? oldRows[0] : null;
-    } catch (error) {
-      return public.handleQueryError(res, error);
-    }
+      const oldContactsRow = oldRows && oldRows.length > 0 ? oldRows[0] : null;
 
-    const sqlList = [];
-    stripBuriedBody(req);
+      let contactsChanged = false;
+      let affected = 0;
+      const contactsStatements = await public.buildContactsSyncStatements(
+        req.data.dataBase, idRoom, contactsName, contactsPhone, contactsIDCard, req.data.userName, conn,
+      );
+      if (contactsStatements.length > 0) {
+        affected += await public.execWith(conn, contactsStatements);
+        contactsChanged = true;
+      }
+
+      // 旧记录清理:新联系人名与旧名不同(含清空)时软删旧记录(同下葬页修改) 20260923 新增,
+      const oldContacts = oldContactsRow ? oldContactsRow.contacts : null;
+      const oldPhone = oldContactsRow ? oldContactsRow.contactsphone : null;
+      const oldContactsValid = public.hasFilledValue(oldContacts);
+      const newName = contactsName === undefined || contactsName === null ? '' : String(contactsName).trim();
+      if (oldContactsValid && String(oldContacts).trim() !== newName) {
+        const conditionParts = ['idRoom = ?', 'contacts = ?', 'isDeleted = 0'];
+        const conditionParams = [idRoom, String(oldContacts).trim()];
+        if (public.hasFilledValue(oldPhone)) {
+          conditionParts.push('contactsPhone = ?');
+          conditionParams.push(String(oldPhone).trim());
+        }
+        affected += await public.execWith(conn, [public.getSoftDeleteByConditionStatement({
+          table: req.data.dataBase + '.contacts',
+          condition: { sql: conditionParts.join(' AND '), params: conditionParams },
+          isDeleted: 1,
+          operator: req.data.userName,
+        })]);
+        contactsChanged = true;
+      }
+
+      if (contactsChanged) {
+        affected += await public.execWith(conn, [public.getRoomContactsSyncSql(req.data.dataBase, idRoom)]);
+      }
+      return affected;
+    });
+
+    public.stripBuriedFormFields(req.body);
     // 安葬者三字段属 buried 表,保留直接写入(此前误删致记录丢失,同下葬页) 20260924 修复
     req.body.table = req.data.dataBase + '.buried';
     req.body.operator = req.data.userName;
@@ -652,43 +589,7 @@ router.post('/update', async (req, res) => {
 
     sqlList.push(public.getRoomDeceasedSyncSql(req.data.dataBase, idRoom));
 
-    // 联系人同步 + 旧联系人清理(同下葬页修改) 20260923 新增,
-    try {
-      let contactsChanged = false;
-      const contactsStatements = await public.buildContactsSyncStatements(
-        req.data.dataBase, idRoom, contactsName, contactsPhone, contactsIDCard, req.data.userName,
-      );
-      if (contactsStatements.length > 0) {
-        sqlList.push(...contactsStatements);
-        contactsChanged = true;
-      }
-
-      const oldContacts = oldContactsRow ? oldContactsRow.contacts : null;
-      const oldPhone = oldContactsRow ? oldContactsRow.contactsphone : null;
-      const oldContactsValid = oldContacts !== null && oldContacts !== undefined && String(oldContacts).trim() !== '';
-      const newName = contactsName === undefined || contactsName === null ? '' : String(contactsName).trim();
-      if (oldContactsValid && String(oldContacts).trim() !== newName) {
-        const conditionParts = ['idRoom = ?', 'contacts = ?', 'isDeleted = 0'];
-        const conditionParams = [idRoom, String(oldContacts).trim()];
-        if (oldPhone !== null && oldPhone !== undefined && String(oldPhone).trim() !== '') {
-          conditionParts.push('contactsPhone = ?');
-          conditionParams.push(String(oldPhone).trim());
-        }
-        sqlList.push(public.getSoftDeleteByConditionStatement({
-          table: req.data.dataBase + '.contacts',
-          condition: { sql: conditionParts.join(' AND '), params: conditionParams },
-          isDeleted: 1,
-          operator: req.data.userName,
-        }));
-        contactsChanged = true;
-      }
-
-      if (contactsChanged) {
-        sqlList.push(public.getRoomContactsSyncSql(req.data.dataBase, idRoom));
-      }
-    } catch (error) {
-      return public.handleQueryError(res, error);
-    }
+    // 联系人同步 + 旧联系人清理已上提到本分支开头的事务项内(20261021 审查修复二轮 P0-2),
 
     return public.Transaction(sqlList, res);
   }
@@ -752,19 +653,8 @@ router.post('/update', async (req, res) => {
       return res.status(400).json({ error: 'idBusiness参数错误!' });
     }
 
-    delete req.body.payer;
-    delete req.body.payerPhone;
-    delete req.body.payerIDCard;
-    delete req.body.realPrice;
-    delete req.body.realPriceString;
-    delete req.body.payee;
-    delete req.body.deceased;
-    delete req.body.deceasedIDCard;
-    delete req.body.contacts;
-    delete req.body.contactsphone;
-    delete req.body.contactsIDCard;
-    // 墓位不变,无需更新外键 idRoom
-    delete req.body.idRoom;
+    // 业务侧字段剔除与新建共用同一函数;墓位不变故 idRoom 也不得进 SET 20261011 修改,
+    public.prepareCertificateFormBody(req.body, true);
 
     req.body.table = req.data.dataBase + '.burial_cert';
     req.body.operator = req.data.userName;
@@ -782,13 +672,7 @@ router.post('/update', async (req, res) => {
     return res.status(400).json({ error: 'idBusiness参数错误!' });
   }
 
-  delete req.body.deceased;
-  delete req.body.burialDate;
-  delete req.body.deceasedIDCard;
-  delete req.body.deceasedRelation;
-  delete req.body.contacts;
-  delete req.body.contactsphone;
-  delete req.body.contactsIDCard;
+  public.stripDefaultFormFields(req.body);
   req.body.table = req.data.dataBase + '.graveplotbusiness';
   req.body.operator = req.data.userName;
   delete req.body.realPriceString;

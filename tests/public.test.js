@@ -59,15 +59,59 @@ test('getUpdateByConditionStatement: 条件参数化拼接,值不内联进SQL', 
   assert.strictEqual(statement.params[3], '1000001');
 });
 
-test('hashPassword/verifyPassword/isBcryptHash: 哈希与明文兼容校验', async () => {
+test('hashPassword/verifyPassword/isScryptHash: scrypt 哈希与存量形式兼容校验', async () => {
+  // 口径改造(审查修复 20261021 二轮 P1-6):新哈希为 scrypt,bcrypt 与明文仅作存量登录兼容,
   const hashed = await public.hashPassword('1234');
-  assert.strictEqual(public.isBcryptHash(hashed), true);
-  assert.strictEqual(public.isBcryptHash('1234'), false);
+  assert.strictEqual(public.isScryptHash(hashed), true);
+  assert.strictEqual(public.isBcryptHash(hashed), false, '新哈希不应再是 bcrypt 形式');
+  assert.strictEqual(public.looksHashed(hashed), true);
+  assert.strictEqual(public.looksHashed('1234'), false);
+  assert.strictEqual(public.needsPasswordUpgrade(hashed), false, 'scrypt 形式无需再升级');
+  // 长度守卫:operator/account.password 列是 varchar(100),超出会被静默截断导致登录永久失败,
+  assert.ok(hashed.length <= 100, `哈希串不得超 100 字,实际 ${hashed.length}`);
   assert.strictEqual(await public.verifyPassword('1234', hashed), true);
   assert.strictEqual(await public.verifyPassword('wrong', hashed), false);
+  // 脏格式(段数不足)判不匹配而非抛错,
+  assert.strictEqual(await public.verifyPassword('1234', 'scrypt$32768$8$1$abc'), false);
   // 存量明文兼容:明文比对仍可用
   assert.strictEqual(await public.verifyPassword('1234', '1234'), true);
   assert.strictEqual(await public.verifyPassword('1234', '5678'), false);
+});
+
+test('verifyPassword: 存量 bcrypt 哈希仍可登录且被判定为需升级', async () => {
+  // cost 取 4 仅为本用例跑得快,与线上的 cost=10 同为 $2 前缀格式,
+  const legacy = require('bcryptjs').hashSync('1234', 4);
+  assert.strictEqual(public.isBcryptHash(legacy), true);
+  assert.strictEqual(public.looksHashed(legacy), true, 'bcrypt 存量不得被当成明文再哈希');
+  assert.strictEqual(public.needsPasswordUpgrade(legacy), true, 'bcrypt 存量应在登录成功后升级');
+  assert.strictEqual(await public.verifyPassword('1234', legacy), true);
+  assert.strictEqual(await public.verifyPassword('wrong', legacy), false);
+  // 明文存量同理需升级(升级判定只看“是不是 scrypt”),
+  assert.strictEqual(public.looksHashed('1234'), false);
+  assert.strictEqual(public.needsPasswordUpgrade('1234'), true);
+});
+
+test('getMultiRowInsertStatements: 多行合并为多条多值 INSERT 并对齐占位符', () => {
+  const statements = public.getMultiRowInsertStatements({
+    table: 'gm_data_001.room',
+    payloads: [
+      { xyNumber: '1排1号', yNum: 1, xNum: 1, table: 'gm_data_001.room' },
+      { xyNumber: '1排2号', yNum: 1, xNum: 2 },
+    ],
+  });
+
+  assert.strictEqual(statements.length, 1, '2 行应合并为 1 条语句');
+  assert.strictEqual(statements[0].sql.split(' values ').length - 1, 1, '列名只出现一次');
+  assert.strictEqual((statements[0].sql.match(/\),\s*\(/g) || []).length, 1, '两个值元组之间应有一个逗号分隔');
+  // 保留列仍被剔除(与单行写法的闸门一致),
+  assert.ok(!statements[0].sql.includes('isDeleted'), '保留列不得进入多值 INSERT');
+  // $N 按出现顺序展开为 ?,参数个数必须与 ? 个数逐一对齐,
+  const normalized = statements[0].sql.replace(/\$\d+(?![A-Za-z0-9_$])/g, '?');
+  assert.strictEqual((normalized.match(/\?/g) || []).length, statements[0].params.length);
+  assert.ok(normalized.startsWith('insert into gm_data_001.room ('), normalized);
+
+  const empty = public.getMultiRowInsertStatements({ table: 'gm_data_001.room', payloads: [] });
+  assert.deepStrictEqual(empty, [], '空批次不得生成语句');
 });
 
 test('format: 数字千分位', () => {

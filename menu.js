@@ -146,7 +146,15 @@ router.get('/', async (req, res) => {
         // 管理费用收款/管理期限维护 20260925 自收费管理迁入墓位管理(菜单 id 103108/103109),一并挂到各区域下,
         // 区域二级菜单按当前操作员 operator.region 收窄,未配置区域(及平台管理员)时不做过滤;
         // 区域取数已上收到 rbac,与区域下拉同源 20261010 修改,
-        const operatorRegions = await rbac.fetchOperatorRegions(req);
+        // 本接口单独保留降级:取数失败时按“不过滤”渲染菜单树。菜单层级只是导航展示,
+        // 不取菜单并不能读到数据——数据层仍由 requireRegionScope 严格把关(取数失败即 500),
+        // 在此抛错只会让操作员在 operator 表抖动时连不上系统(20261021 审查修复二轮 P1-4 的平衡点),
+        let operatorRegions = [];
+        try {
+            operatorRegions = await rbac.fetchOperatorRegions(req);
+        } catch (regionError) {
+            console.warn('fetchOperatorRegions failed(菜单降级为不过滤):', req.data.userId, regionError.message);
+        }
         await rebuildRegionMenus(menuTree, req.data.dataBase, 'operate', ['gravePlotBusiness', 'sale', 'buried', 'reserve', 'contacts', 'transferOut', 'room', 'adminfee', 'managementPeriod'], operatorRegions);
         return public.respondList(res, menuTree);
     } catch (error) {

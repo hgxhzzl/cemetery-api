@@ -23,14 +23,14 @@ router.post('/insert', async (req, res) => {
   delete req.body.idReserve;
 
   // 一穴一条:该墓位已有预定记录则复用原行覆盖字段,不再新增第二条 20261011 修改,
-  let reserveWrite;
-  try {
-    reserveWrite = await public.buildReserveUpsertStatements(req.data.dataBase, idRoom, req.body);
-  } catch (error) {
-    return public.handleQueryError(res, error);
-  }
-
-  const sqlList = [...reserveWrite.statements];
+  // 20261021 审查修复二轮 P0-2:“查已有行→决定复用还是新增”原先跑在事务外的池上,
+  // 两个操作员同时给同一墓位登记预定时都读到“没有”,会各插一条活动预定;
+  // 现收进事务项,在同一连接上 FOR UPDATE 读后再构造语句,
+  const sqlList = [];
+  sqlList.push(async (conn) => {
+    const reserveWrite = await public.buildReserveUpsertStatements(req.data.dataBase, idRoom, req.body, conn);
+    return public.execWith(conn, reserveWrite.statements);
+  });
   const json = {};
   json.table = req.data.dataBase + '.room';
   json.operator = req.data.userName;

@@ -70,10 +70,12 @@ router.get('/room-list', async (req, res) => {
     conditions.push('r.park = ?');
     params.push(req.query.park);
   }
-  // 子查询按 idRoom 去重活动预定记录(一穴多条历史预定仅取活动的一条)，MAX 兜底防重复行放大
-  const sql = `SELECT r.*, rv.reserver FROM ${req.data.dataBase}.room r
-    LEFT JOIN (SELECT idRoom, MAX(liaison) AS reserver FROM ${req.data.dataBase}.reserve WHERE isDeleted = 0 GROUP BY idRoom) rv
-    ON rv.idRoom = r.idRoom
+  // 子查询按 idRoom 取活动预定记录(一穴多条历史预定仅取最新的一条)
+  // 20261021 审查修复二轮 P1-8:改相关子查询取代 LEFT JOIN 派生表——带 GROUP BY 的派生表无法与外层合并,
+  // MySQL 每次请求都要先全表扫描 reserve 并落临时表,存量预定越多本页越慢;现仅对本页行走 idx_reserve_idRoom,
+  const sql = `SELECT r.*, (SELECT rs.liaison FROM ${req.data.dataBase}.reserve rs
+      WHERE rs.idRoom = r.idRoom AND rs.isDeleted = 0 ORDER BY rs.idReserve DESC LIMIT 1) AS reserver
+    FROM ${req.data.dataBase}.room r
     WHERE ${conditions.join(' AND ')}`;
   try {
     const results = await pool.query(sql, params);

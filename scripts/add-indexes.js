@@ -1,7 +1,7 @@
 // 线上库二级索引幂等补齐脚本 20261019 性能优化新增:
 // gm_data_000.sql 的 KEY 定义只对新库生效,已上线老库执行本脚本补齐同一批索引;
 // 每项先查 information_schema.STATISTICS,不存在才 ALTER TABLE ADD INDEX,重复运行安全
-require('dotenv').config();
+require('dotenv').config({ quiet: true });
 
 const mysql = require('mysql2/promise');
 const config = require('../config');

@@ -5,6 +5,8 @@ const getToken = require('./token.js');
 const loginState = require('./loginState');
 const loginRateLimit = require('./loginRateLimit');
 const device = require('./device');
+// 租户库名闸门(审查修复 20261021 二轮 P0-1):签票前也要过同一口径,实现见 tenant.js,
+const tenant = require('./tenant');
 const config = require('./config');
 // 创建 MySQL 连接池
 const pool = require('./database.js');
@@ -64,9 +66,10 @@ router.post('/', async (req, res) => {
     if (config.loginRateLimit.enabled) {
       loginRateLimit.clearFailures(loginRateLimit.normalizeKey(phone));
     }
-    // 存量明文密码校验通过后自动升级为bcrypt存储,升级失败不影响本次登录 20260915 安全改造,
-    if (!bublicfun.isBcryptHash(user.password)) {
-      bublicfun.hashPassword(user.password).then((hashed) => {
+    // 存量口令(明文或旧 bcrypt 哈希)校验通过后自动升级为 scrypt 存储,升级失败不影响本次登录 20260915 安全改造, 20261021 审查修复二轮 P1-6 调整,
+    // 升级拿的是本次提交的明文而不是库中存值(旧写法用 user.password,对 bcrypt 存量会“把哈希当明文再哈希”把口令搞坏),
+    if (bublicfun.needsPasswordUpgrade(user.password)) {
+      bublicfun.hashPassword(password).then((hashed) => {
         pool.query('UPDATE gm_data_000.operator SET password = ? WHERE idOperator = ?', [hashed, user.userid], () => {});
       }).catch(() => {});
     }
@@ -82,6 +85,12 @@ router.post('/', async (req, res) => {
     const userid = user.userid;
     const userName = user.username;
     const dataBaseName = user.dataBaseName;
+    // 签票前闸门:库名来自 account 表,异常数据(被改过的 dataBaseName)不应换成一张能指到任意库的票,
+    // 与验签后的校验用同一个 tenant.isAllowed,保证“能签出的库名”与“能用的库名”完全一致 20261021 审查修复二轮 P0-1,
+    if (!tenant.isAllowed(dataBaseName)) {
+      console.error('[tenant] 操作员所属库名不合法,拒绝签发 token:', user.userid, String(dataBaseName).slice(0, 40));
+      return res.status(500).json({ code: 500, message: '账户归属配置异常，请联系平台管理员' });
+    }
     const token = getToken.setToken(phone,userName,dataBaseName,userid,Number(user.isAccount));
     const info = 'Bearer '+token;
     //取到到期时间戳

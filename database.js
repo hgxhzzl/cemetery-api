@@ -1,6 +1,9 @@
 const mysql = require('mysql2/promise');
 const config = require('./config');
 const requestContext = require('./requestContext');
+// 分页总数短 TTL 缓存的作废入口(审查修复 20261021 二轮 P2-14):
+// 写语句一律在本统一执行面作废缓存,不依赖各业务文件自觉,本模块与 countCache 不成环(它只依 config),
+const countCache = require('./lib/countCache');
 
 // 连接池参数(审查修复 20261021 P2 性能):原写法 connectionLimit=20 写死且 queueLimit 缺省(=不限等待队列),
 // 数据库抖动时上游请求无界堆积、整站表现为“卡住”,现改为环境变量可调(config.database.pool),
@@ -42,7 +45,9 @@ function markSlowQuery(sql, startedAt, tag) {
   if (cost < SLOW_QUERY_MS) {
     return;
   }
-  console.warn(`[slow-query] ${tag} ${cost}ms ${String(sql).replace(/\s+/g, ' ').slice(0, 200)}`);
+  // 行首带请求关联号(审查修复 20261021 二轮 P2-16):否则慢语句只能看到时间戳与耗时,
+  // 无法与同一次操作的 access log / 错误堆栈对到同一请求上,
+  console.warn(`[slow-query][${requestContext.getRequestId()}] ${tag} ${cost}ms ${String(sql).replace(/\s+/g, ' ').slice(0, 200)}`);
 }
 
 function normalizeResult(result) {
@@ -78,6 +83,7 @@ function resolveQueryArgs(paramsOrCallback, maybeCallback) {
 function query(sql, paramsOrCallback, maybeCallback) {
   const { params, callback } = resolveQueryArgs(paramsOrCallback, maybeCallback);
   const normalizedSql = normalizeSql(sql);
+  countCache.invalidateForStatement(normalizedSql);
   const startedAt = Date.now();
   const promise = activePool
     .query(normalizedSql, params)
@@ -117,6 +123,7 @@ function traceTransactionConnection(connection) {
       if (property === 'query') {
         return async (sql, params) => {
           const normalized = normalizeSql(sql);
+          countCache.invalidateForStatement(normalized);
           const startedAt = Date.now();
           try {
             return await target.query(normalized, params);
@@ -139,6 +146,7 @@ async function withTransaction(sqlList) {
     await connection.beginTransaction();
     for (const item of sqlList) {
       if (typeof item === 'string') {
+        countCache.invalidateForStatement(normalizeSql(item));
         affectedRows += countAffected(await connection.query(normalizeSql(item)));
         continue;
       }
@@ -158,6 +166,7 @@ async function withTransaction(sqlList) {
 
       if (item && typeof item.sql === 'string') {
         const params = Array.isArray(item.params) ? item.params : [];
+        countCache.invalidateForStatement(normalizeSql(item.sql));
         affectedRows += countAffected(await connection.query(normalizeSql(item.sql), params));
         continue;
       }

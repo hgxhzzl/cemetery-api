@@ -46,20 +46,21 @@ router.get('/list', async (req, res) => {
     WHERE ${whereSql}`;
 
     try {
-        const countResults = await pool.query(countSql, params);
-        const total = countResults[0].total;
-        // 金额合计：SUM 可能返回 DECIMAL 字符串，统一转 Number 供前端千分位格式化 20260913 新增
-        const totalAmount = Number(countResults[0].totalAmount) || 0;
-
         const dataSql = `SELECT s.idSale, s.idRoom, r.region, r.park, r.xyNumber, r.price, s.realPrice, s.payer, s.payerPhone, s.createDate
     FROM ${req.data.dataBase}.sale s JOIN ${req.data.dataBase}.room r ON s.idRoom = r.idRoom
     WHERE ${whereSql}
     ORDER BY s.createDate DESC, s.idSale DESC
     LIMIT ? OFFSET ?`;
 
-        const results = await pool.query(dataSql, [...params, pageSize, (current - 1) * pageSize]);
+        // 总数与金额合计短 TTL 复用并与取数并发发出(审查修复 20261021 二轮 P2-14):同一筛选条件下翻页时
+        // 这两个聚合值根本不会变,而 COUNT(*) + SUM(realPrice) 要同时扫 sale 与 room 两表;原写法还是串行两段, 20261021 改造,
+        // queryAggregate 已将列值统一转 Number(原写法同样在此处转),SUM 返回的 DECIMAL 字符串不影响前端千分位格式化,
+        const [aggregate, results] = await Promise.all([
+            public.queryAggregate(pool.query, { database: req.data.dataBase, sql: countSql, params, columns: ['total', 'totalAmount'] }),
+            pool.query(dataSql, [...params, pageSize, (current - 1) * pageSize]),
+        ]);
         // 分页结果：list 当前页数据，total 总记录数供前端分页组件使用 20260911 新增
-        return res.json({ code: 0, data: { list: results, total, totalAmount } });
+        return res.json({ code: 0, data: { list: results, total: aggregate.total, totalAmount: aggregate.totalAmount } });
     } catch (error) {
         return public.handleQueryError(res, error);
     }

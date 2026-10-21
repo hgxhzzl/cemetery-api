@@ -6,6 +6,8 @@ const bodyParser = require('body-parser');
 const vertoken = require('./token');
 const loginState = require('./loginState');
 const device = require('./device');
+// 租户库名闸门(审查修复 20261021 二轮 P0-1):验签后、业务前的单点校验,实现见 tenant.js,
+const tenant = require('./tenant');
 const config = require('./config');
 const requestContext = require('./requestContext');
 const database = require('./database');
@@ -23,7 +25,7 @@ const app = express();
 // 这里记录日志并尽量为尚未应答的请求补发 500（requestContext 在同一异步链上可取到 res），
 // 覆盖各路由 try 外的同步抛错路径（如语句构造 assertIdentifier） 20261021 审查修复②,
 process.on('unhandledRejection', (reason) => {
-  console.error('[unhandledRejection]', reason && reason.stack ? reason.stack : reason);
+  console.error(`[unhandledRejection][${requestContext.getRequestId()}]`, reason && reason.stack ? reason.stack : reason);
   try {
     const res = requestContext.getResponse();
     if (res && !res.headersSent) {
@@ -38,9 +40,17 @@ process.on('unhandledRejection', (reason) => {
 // token 失效文案与统一 401 信封改由 public.respondUnauthorized 下发(审查修复 20261021 P1-5),
 // 本文件不再单独引用 TOKEN_EXPIRED_MESSAGE,
 
+// 请求关联号必须挂在最前(在任何一条日志之前):安全头/压缩/鉴权/业务各处的日志行首都靠它,
+// 同时把该号回写 X-Request-Id 供前端报障时直接引用(审查修复 20261021 二轮 P2-16),
+app.use(httpDefaults.attachRequestId);
+
 // 安全响应头/请求日志/404 与终态错误信封均与业务无关,已抽到 httpDefaults.js 以便单测覆盖,
 // 安全头必须挂在最前面:请求体解析失败/404/500 等短路路径同样要带头(审查修复 20261021 P2),
 app.use(httpDefaults.securityHeaders);
+
+// gzip 压缩紧跟安全头挂在所有业务路由之前:这样 404 兜底与终态错误信封的响应同样被覆盖,
+// 而不只是正常业务响应(审查修复 20261021 二轮 P2-13),
+app.use(httpDefaults.gzipJson);
 
 //路由
 app.get('/', (req, res) => {
@@ -51,7 +61,7 @@ app.get('/', (req, res) => {
 // 超限由 body-parser 抛 entity.too.large 并由下方终态错误中间件统一回 413 JSON 信封,
 app.use(bodyParser.urlencoded({ extended: false, limit: config.app.bodyLimit }));
 app.use(bodyParser.json({ limit: config.app.bodyLimit }));
-app.use((req, res, next) => requestContext.runWithResponse(res, next));
+app.use((req, res, next) => requestContext.runWithResponse(res, req.reqId, next));
 // 响应信封归一:必须在 body 解析之后、任何路由之前挂载,
 // 把历史手写 `json({ error })` / 缺 code 的响应体统一补齐为 `{code, message, ...}`(审查修复 20261021 P1-5),
 app.use(public.normalizeEnvelope);
@@ -90,6 +100,13 @@ app.use(async function (req, res, next) {
     // 验签失败/token过期由认证层直接闭环,不再依赖下方认证闸门兜底 20260917 收口,
     return public.respondUnauthorized(res);
   }
+  // 租户库名闸门(审查修复 20261021 二轮 P0-1):下游 240+ 处 `${req.data.dataBase}.表名` 拼串此前只有 3 处做过
+  // 标识符断言,“库名不可能是注入载体”完全建在“密钥不外泄”上;现在唯一入口处收口,
+  // 不合法库名一律按身份失效处理:既防伪造 token 注入,也防手工签发的 token 指到别家租户的库,
+  if (!tenant.isAllowed(req.data.dataBase)) {
+    console.warn('tenant 401:', req.reqId, 'invalid_dataBase', req.method, public.maskRequestTarget(req.originalUrl));
+    return public.respondUnauthorized(res);
+  }
   // 校验活跃登录态:DB 查询失败按服务错误处理,避免误报为 token 失效 20260917 登录态DB化,
   try {
     const active = await loginState.hasActiveLogin(req.data.phone, req.data.exp);
@@ -111,7 +128,7 @@ app.use(function (req, res, next) {
     return next();
   }
   if (!req.data) {
-    console.warn('auth 401:', 'no_valid_identity', req.method, public.maskRequestTarget(req.originalUrl));
+    console.warn('auth 401:', req.reqId, 'no_valid_identity', req.method, public.maskRequestTarget(req.originalUrl));
     return public.respondUnauthorized(res);
   }
   return next();
@@ -120,11 +137,11 @@ app.use(function (req, res, next) {
   app.use(function(err, req, res, next) {
 
   if (err.status == 401) {
-    console.warn('auth 401:', err.code || 'unauthorized', req.method, public.maskRequestTarget(req.originalUrl));
+    console.warn('auth 401:', req.reqId, err.code || 'unauthorized', req.method, public.maskRequestTarget(req.originalUrl));
     return public.respondUnauthorized(res);
   }
 
-  console.error('Unhandled middleware error:', err);
+  console.error('Unhandled middleware error:', req.reqId, err);
   return next(err);
   });
 
@@ -143,6 +160,9 @@ app.use(httpDefaults.notFound);
 
 // 终态错误中间件:统一回 JSON 信封并把堆栈留在日志(实现见 httpDefaults.js),
 app.use(httpDefaults.finalError);
+// 传输层超时(审查修复 20261021 二轮 P2-23):本服务此前完全没设 HTTP 超时,一个只发头不发体的
+// 慢连接可以按 Node 默认值占住 socket 五分钟;阈值均走配置(置 0 即不改行为),口径与回读见 httpDefaults.js,
+
 //启动服务器
 // 生产环境敏感配置缺失时拒绝启动 20260917 收口,
 if (config.securityFatal.length > 0) {
@@ -151,15 +171,19 @@ if (config.securityFatal.length > 0) {
 }
 
 // 启动前幂等建表:确保登录态表 login_session 存在,线上老库缺表曾导致登录 500 20260917 修复,
+// tenant.ensureLoaded:首次拉取已登记租户库名单(拉不到不致命,闸门会降级为仅形态白名单),
 let server = null;
-Promise.all([loginState.ensureTable(), device.ensureTable()]).then(() => {
+Promise.all([loginState.ensureTable(), device.ensureTable(), tenant.ensureLoaded()]).then(() => {
   server = app.listen(config.app.port, () => {
+    httpDefaults.applyServerTimeouts(server);
     console.log(`Server is running on port ${config.app.port}`);
+    // 租户库名单周期刷新(5 分钟),新建租户无需重启, 20261021 审查修复二轮 P0-1,
+    tenant.startAutoRefresh();
     // 敏感配置默认值告警:生产环境务必通过环境变量覆盖 20260917 新增,
     config.securityWarnings.forEach((warning) => console.warn('[security]', warning));
   });
 }).catch((error) => {
-  console.error('[startup] login_session 建表失败,拒绝启动:', error.message);
+  console.error('[startup] 启动前置检查(建表/租户名单)失败,拒绝启动:', error.message);
   process.exit(1);
 });
 

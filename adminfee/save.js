@@ -94,17 +94,19 @@ router.post('/insert', async (req, res) => {
   });
 
   // 联系人同步:按 名/电话 匹配活动联系人执行新增/更新,并同步 room.contacts 聚合;口径同墓位下葬(buried/save.js) 20261017 新增,
-  try {
+  // 20261021 审查修复二轮 P0-2:匹配用的读语句原先跑在事务外的池上、语句却排进本事务,
+  // 并发提交同一墓位时双方都读不到对方未提交的联系人行(重复插入),现收进事务项内锁读→算→写,
+  sqlList.push(async (conn) => {
     const contactsStatements = await public.buildContactsSyncStatements(
-      req.data.dataBase, idRoom, contactsName, contactsPhone, contactsIDCard, req.data.userName,
+      req.data.dataBase, idRoom, contactsName, contactsPhone, contactsIDCard, req.data.userName, conn,
     );
-    if (contactsStatements.length > 0) {
-      sqlList.push(...contactsStatements);
-      sqlList.push(public.getRoomContactsSyncSql(req.data.dataBase, idRoom));
+    if (contactsStatements.length === 0) {
+      return 0;
     }
-  } catch (error) {
-    return public.handleQueryError(res, error);
-  }
+    const affected = await public.execWith(conn, contactsStatements);
+    await public.execWith(conn, [public.getRoomContactsSyncSql(req.data.dataBase, idRoom)]);
+    return affected;
+  });
 
   return public.Transaction(sqlList, res);
 });
@@ -195,17 +197,18 @@ router.post('/update', async (req, res) => {
   });
 
   // 联系人同步:按 名/电话 匹配活动联系人执行新增/更新,并同步 room.contacts 聚合;口径同墓位下葬(buried/save.js) 20261017 新增,
-  try {
+  // 20261021 审查修复二轮 P0-2:同上——读与写一并收进事务项,
+  sqlList.push(async (conn) => {
     const contactsStatements = await public.buildContactsSyncStatements(
-      req.data.dataBase, idRoom, contactsName, contactsPhone, contactsIDCard, req.data.userName,
+      req.data.dataBase, idRoom, contactsName, contactsPhone, contactsIDCard, req.data.userName, conn,
     );
-    if (contactsStatements.length > 0) {
-      sqlList.push(...contactsStatements);
-      sqlList.push(public.getRoomContactsSyncSql(req.data.dataBase, idRoom));
+    if (contactsStatements.length === 0) {
+      return 0;
     }
-  } catch (error) {
-    return public.handleQueryError(res, error);
-  }
+    const affected = await public.execWith(conn, contactsStatements);
+    await public.execWith(conn, [public.getRoomContactsSyncSql(req.data.dataBase, idRoom)]);
+    return affected;
+  });
 
   return public.Transaction(sqlList, res);
 });

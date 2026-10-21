@@ -136,9 +136,9 @@ router.post('/update', async (req, res) => {
   }
 
   // 密码字段若随更新提交,统一哈希后再落库 20260915 安全改造,
-  // 已是bcrypt哈希时跳过,防止前端回填的旧哈希被二次哈希导致登录失效 20260916 修复,
+  // 已是哈希值(bcrypt 存量或 scrypt 新版)时跳过,防止前端回填的旧哈希被二次哈希导致登录失效 20260916 修复, 20261021 审查修复二轮 P1-6 调整,
   let passwordUpdated = false;
-  if (req.body.password !== undefined && req.body.password !== '' && !public.isBcryptHash(req.body.password)) {
+  if (req.body.password !== undefined && req.body.password !== '' && !public.looksHashed(req.body.password)) {
     req.body.password = await public.hashPassword(req.body.password);
     passwordUpdated = true;
   }
@@ -172,16 +172,19 @@ router.post('/update', async (req, res) => {
   sqlList.push(statement);
 
   // 口令在本次更新里被真正改动时作废该操作员的活跃登录态:旧 token 不应在到期前继续可用 20261021 审查修复 P0-3,
-  if (passwordUpdated && targetPhone) {
-    try {
-      await loginState.deleteActiveLogin(targetPhone);
-    } catch (error) {
-      console.error('revoke login session failed:', error);
+  // 20261021 审查修复二轮 P2-22:撤销动作从“事务前”排到“commit 后”——旧写法在写库事务提交前就删了会话,
+  // 事务一旦回滚(口令没改成)人却被踢下线,且下一行还要靠它自己的 try 兜底,现与守卫缓存作废合并到同一个回调里,
+  function onCommitted() {
+    // 区域/提权列变更后作废守卫缓存,不等 30s TTL 自然过期(审查修复 20261021 P2 性能),
+    rbac.invalidateAuthCaches();
+    if (passwordUpdated && targetPhone) {
+      loginState.deleteActiveLogin(targetPhone).catch((error) => {
+        console.error('revoke login session failed:', error);
+      });
     }
   }
 
-  // 区域/提权列变更后作废守卫缓存,不等 30s TTL 自然过期(审查修复 20261021 P2 性能),
-  return public.Transaction(sqlList, res, { onCommitted: rbac.invalidateAuthCaches });
+  return public.Transaction(sqlList, res, { onCommitted });
 });
 
 router.post('/password', async (req, res) => {

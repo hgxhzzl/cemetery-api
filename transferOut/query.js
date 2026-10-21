@@ -47,18 +47,20 @@ router.get('/list', async (req, res) => {
     WHERE ${whereSql}`;
 
     try {
-        const countResults = await pool.query(countSql, params);
-        const total = countResults[0].total;
-
         const dataSql = `SELECT t.idTransfer, t.idRoom, r.region, r.park, r.xyNumber, t.transferOutDate, t.destination, t.reason, t.contacts, t.contactsphone, t.operator, t.createDate
     FROM ${req.data.dataBase}.transfer_out t JOIN ${req.data.dataBase}.room r ON t.idRoom = r.idRoom
     WHERE ${whereSql}
     ORDER BY t.transferOutDate DESC, t.idTransfer DESC
     LIMIT ? OFFSET ?`;
 
-        const results = await pool.query(dataSql, [...params, pageSize, (current - 1) * pageSize]);
+        // 总数短 TTL 复用并与取数并发发出(审查修复 20261021 二轮 P2-14):同一筛选条件下翻页时总数不会变,
+        // 而这条 COUNT(*) 要扫 transfer_out 与 room 两表;原写法串行等 count 返回才发数据查询,每页白多一个往返, 20261021 改造,
+        const [aggregate, results] = await Promise.all([
+            public.queryAggregate(pool.query, { database: req.data.dataBase, sql: countSql, params }),
+            pool.query(dataSql, [...params, pageSize, (current - 1) * pageSize]),
+        ]);
         // 分页结果：list 当前页数据，total 总记录数供前端滚动加载使用 20260916 新增
-        return res.json({ code: 0, data: { list: results, total } });
+        return res.json({ code: 0, data: { list: results, total: aggregate.total } });
     } catch (error) {
         return public.handleQueryError(res, error);
     }

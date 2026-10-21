@@ -156,8 +156,8 @@ function requirePowerByAnyMenuName(...menuNames) {
   };
 }
 
-// 共用详情页(room-detail)取数放行:打开详情需并行拉 6 类数据(room/预定/销售/下葬/管理费/联系人),
-// 它们分属 6 个业务菜单接口前缀。若逐个按自身菜单校验,只开通部分模块的租户点详情会整批 403,
+// 共用详情页(room-detail)取数放行:打开详情需并行拉 7 类数据(room/预定/销售/下葬/管理费/联系人/迁出),
+// 它们分属 7 个业务菜单接口前缀。若逐个按自身菜单校验,只开通部分模块的租户点详情会整批 403,
 // 而前端 Promise.all 一遇失败即静默放弃(详情视图不出现且无任何提示),表现为"点详情没反应"。
 // 口径统一为:调用"详情专用取数路径"时,只要具备任一含详情页功能菜单的 useMenu 即放行,
 // 各页卡片列表(/room /canSale /parkTree /room?park=region= 等)仍按自身菜单严格校验 20261004 修改,
@@ -167,21 +167,44 @@ const DETAIL_PAGE_MENUS = [
   'roomQuery', 'saleQuery', 'buriedQuery', 'adminfeeQuery', 'contactsQuery', 'transferOutQuery',
 ];
 
-// 详情专用路径判定:req.path 已被 express 剥掉挂载前缀,
-// /idList = room-query 单墓位;/get-by-room = sale/reserve 活动记录;
-// 裸 / 且仅带 idRoom = buried/contacts/adminfee 的该墓位记录列表(带 park/region 的卡片列表不算)20261004 新增,
+// 详情聚合放行的显式路径白名单(审查修复 20261021 二轮 P1-3):原判定是“路径形状猜测”
+// (req.path 为 /idList、/get-by-room,或裸 / 且带 idRoom),由此带来三处口径外溢:
+// 1) 挂了 queryDetail 的前缀里,凡形状吻合的路径都走宽松校验,包括该前缀上根本不存在的路由(如 /api/sale-query/idList);
+// 2) 裸 / 只看“带 idRoom 且不带 park/region”,今后同前缀新增一个带 idRoom 的列表接口会被误升级为详情口径;
+// 3) 前端 useRoomDetail 实际并行拉 7 类,此表中迁出记录一前(/api/transferOut-query 裸 /)此前未登记详情放行,
+//    只有其它墓位菜单的操作员点详情会因这一路 403 使整个详情打不开(与本口径初衷相悖),
+// 现按「挂载前缀 + 路径」逐项登记,并限定 GET 且 idRoom 必须是数值,任一不吻合即回到该前缀自身的严格菜单口径,
+const DETAIL_AGGREGATE_ROUTES = [
+  { prefix: '/api/room-query', path: '/idList' },
+  { prefix: '/api/sale-query', path: '/get-by-room' },
+  { prefix: '/api/reserve-query', path: '/get-by-room' },
+  { prefix: '/api/buried-query', path: '/' },
+  { prefix: '/api/adminfee-query', path: '/' },
+  { prefix: '/api/contacts-query', path: '/' },
+  // 迁出前缀同时服务迁出业务页与迁出查询页,权限口径由本条目的 anyMenu 担当,此处只多一道详情放行,
+  { prefix: '/api/transferOut-query', path: '/' },
+];
+
+// 详情专用路径判定:req.path 已被 express 剥掉挂载前缀,前缀取 req.baseUrl(守卫中间件按条目 path 挂载,因此恰为本表登记的完整前缀),
+// 末尾斜杠与无斜杠两种写法在 Express 下 path 分别为 '/' 与 '',一并归一 20261004 新增 20261021 二轮 P1-3 改为显式白名单,
 function isDetailAggregateRequest(req) {
-  const path = String(req.path || '');
-  if (path === '/idList' || path === '/get-by-room') {
-    return true;
+  if (String(req.method || '').toUpperCase() !== 'GET') {
+    return false;
   }
-  const query = req.query || {};
-  return (path === '/' || path === '') && !!query.idRoom && !query.park && !query.region;
+  const prefix = String(req.baseUrl || '');
+  const path = String(req.path || '');
+  const normalizedPath = path === '' ? '/' : path;
+  if (!DETAIL_AGGREGATE_ROUTES.some((rule) => rule.prefix === prefix && rule.path === normalizedPath)) {
+    return false;
+  }
+  // 详情取数必然带数值 idRoom:缺失或非法时不升级为宽松口径——路由自身会回 400,但权限口径不该被参数形状放大,
+  return public.parseNumericParam(req.query && req.query.idRoom) !== null;
 }
 
 // query 前缀守卫:详情取数路径按"任一详情页菜单"放行,其余路径维持单菜单严格校验 20261004 新增,
+// menuName 可为单个菜单名,也可为“任一命中”的菜单名数组(迁出前缀即同时挂业务页与查询页两个菜单) 20261021 二轮 P1-3 扩展,
 function requireQueryPowerWithDetail(menuName) {
-  const pagePower = requirePowerByMenuName(menuName);
+  const pagePower = Array.isArray(menuName) ? requirePowerByAnyMenuName(...menuName) : requirePowerByMenuName(menuName);
   const detailPower = requirePowerByAnyMenuName(...DETAIL_PAGE_MENUS);
   return function (req, res, next) {
     if (isDetailAggregateRequest(req)) {
@@ -198,9 +221,11 @@ const regionScopeCache = new Map();
 
 // 当前登录操作员的所属区域(operator.region,逗号分隔如"福东,福西"):菜单层区域二级菜单收窄与数据层区域下拉
 // 共用同一口径,故从 menu.js 抽出到授权层统一收口 20261010 新增,
-// 返回空数组代表"不做区域过滤",以下三种情况均回退到原有 account_power/operator_power 菜单权限口径:
-// 1) region 未配置; 2) 查询失败; 3) 平台管理员(跨区域运维角色,负责园区设置/票据配置/给操作员分配区域,
+// 返回空数组代表"不做区域过滤",仅以下两种情况为空:1) region 未配置; 2) 平台管理员(跨区域运维角色,负责园区设置/票据配置/给操作员分配区域,
 // 若按其 region 收窄会出现"管理员填了区域就管不了其它区域"的自锁) 20261010 新增,
+// 取数失败不再吞异常返回空数组(旧口径为 3) 查询失败):空名单在下游一律被当作"不过滤",区域管理员遇到
+// operator 表查询抖动时会瞬时拿到全量数据与全量区域下拉,属于 fail-open;现改为向上抛错,
+// 由 requireRegionScope / 各查询接口统一回 500,宁可报错不可越权 20261021 审查修复二轮 P1-4,
 async function fetchOperatorRegions(req) {
   const idOperator = req && req.data && req.data.userId;
   if (!idOperator) {
@@ -222,21 +247,16 @@ async function fetchOperatorRegions(req) {
 }
 
 async function readOperatorRegions(idOperator) {
-  try {
-    const rows = await pool.query('SELECT region FROM gm_data_000.operator WHERE idOperator = ?', [idOperator]);
-    if (!Array.isArray(rows) || rows.length === 0 || !rows[0].region) {
-      return [];
-    }
-    return String(rows[0].region)
-      // 分隔符同时接受半角/全角逗号:前端提交用半角,但存量数据和人工维护的库可能写成全角“，”。
-      // 一旦漏切会把“福东，福西”当成一个区域名,匹配不到任何标签,进而把该组功能整体隐藏掉 20261010 加固,
-      .split(/[,，]/)
-      .map((item) => item.trim())
-      .filter((item) => item !== '');
-  } catch (error) {
-    console.log('fetchOperatorRegions failed:', idOperator, error.message);
+  const rows = await pool.query('SELECT region FROM gm_data_000.operator WHERE idOperator = ?', [idOperator]);
+  if (!Array.isArray(rows) || rows.length === 0 || !rows[0].region) {
     return [];
   }
+  return String(rows[0].region)
+    // 分隔符同时接受半角/全角逗号:前端提交用半角,但存量数据和人工维护的库可能写成全角“，”。
+    // 一旦漏切会把“福东，福西”当成一个区域名,匹配不到任何标签,进而把该组功能整体隐藏掉 20261010 加固,
+    .split(/[,，]/)
+    .map((item) => item.trim())
+    .filter((item) => item !== '');
 }
 
 // 区域作用域中间件:挂在鉴权之后、业务路由之前。两件职责 20261010 新增,
@@ -259,10 +279,13 @@ async function requireRegionScope(req, res, next) {
     return next();
   }
   // 区域分配写操作:仅注入名单供下游参考,跳过越权拦截(名单为空也照常放行)20261012 新增,
+  // 此处取数失败仍降为空名单:该分支不参与越权判定(分配 region 本就是管理动作),
+  // 且真正的权限边界由 requirePowerByMenuName('operator') 把守,不影响安全口径 20261021 审查修复二轮 P1-4,
   if (isRegionAssignmentRequest(req)) {
     try {
       req.operatorRegions = await fetchOperatorRegions(req);
     } catch (error) {
+      console.warn('region scope skipped:', req.data.userId, error.message);
       req.operatorRegions = [];
     }
     return next();
@@ -365,6 +388,8 @@ module.exports = {
   requirePowerByMenuName,
   requirePowerByAnyMenuName,
   requireQueryPowerWithDetail,
+  DETAIL_AGGREGATE_ROUTES,
+  DETAIL_PAGE_MENUS,
   invalidateAuthCaches,
   fetchOperatorRegions,
   filterByOperatorRegions,

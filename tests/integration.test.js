@@ -62,10 +62,12 @@ test.afterEach(() => {
   database.resetPoolForTesting();
 });
 
-// 守卫缓存(菜单权限命中/区域名单)为进程级 30s TTL,用例间必须主动作废,
+// 守卫缓存(菜单权限命中/区域名单)与分页总数缓存为进程级 TTL,用例间必须主动作废,
 // 否则同一 userId 在上一条用例里缓存的结果会串到下一条,使 mock 改行集不再生效 20261021 新增,
+// 总数缓存同理:多条用例都用 gm_data_001 且条件相近,不作废会让第二条用例直接命中上一条的总数, 20261021 二轮 P2-14 补充,
 test.beforeEach(() => {
   require('../rbac').invalidateAuthCaches();
+  require('../lib/countCache').resetForTesting();
 });
 
 // 批量建位上限(审查修复 20261021 P1-3):排×号跨度乘积即待建行数由前端任意给定,超限必须 400 且不发出任何写库语句,
@@ -119,21 +121,80 @@ test('room/save insert: 事务内锁定已占用坐标,跳过重复且 affectedR
     assert.ok(lock.sql.includes('isDeleted = 0'), '只锁活动墓位(已软删行可复用坐标)');
     assert.ok(lock.sql.includes("transferOutStatus <> 'statusType.transferOutStatusEnum.out'"), '已迁出坐标应视为空位');
 
+    // 合并为多值 INSERT(审查修复 20261021 二轮 P1-9):3 个待建坐标只应发 1 条语句,而不是 3 次网络往返,
     const inserts = mockPool.calls.filter((call) => call.sql.includes('insert into gm_data_001.room'));
-    assert.strictEqual(inserts.length, 3, '不应为已占用坐标插入重复墓位');
-    // 从列名清单定位 yNum/xNum 对应参数,核对实建的就是剩下三个坐标 20261021 新增,
-    const coordKeys = inserts.map((call) => {
-      const cols = call.sql
-        .slice(call.sql.indexOf('(') + 1, call.sql.indexOf(')'))
-        .split(',')
-        .map((item) => item.trim());
-      return `${call.params[cols.indexOf('yNum')]}:${call.params[cols.indexOf('xNum')]}`;
-    });
+    assert.strictEqual(inserts.length, 1, '批量建位应合并为一条多值 INSERT');
+    assert.strictEqual((inserts[0].sql.match(/\),\s*\(/g) || []).length, 2, '三个值元组之间应有两个逗号分隔');
+    // 从列名清单定位 yNum/xNum 列位,按“列数 × 行序号”分段取参数,核对实建的就是剩下三个坐标 20261021 新增 20261021 改多值口径,
+    const cols = inserts[0].sql
+      .slice(inserts[0].sql.indexOf('(') + 1, inserts[0].sql.indexOf(')'))
+      .split(',')
+      .map((item) => item.trim());
+    const coordKeys = [];
+    for (let offset = 0; offset < inserts[0].params.length; offset += cols.length) {
+      coordKeys.push(`${inserts[0].params[offset + cols.indexOf('yNum')]}:${inserts[0].params[offset + cols.indexOf('xNum')]}`);
+    }
+    assert.strictEqual(inserts[0].params.length, cols.length * 3, '参数个数应为列数 × 行数');
     assert.deepStrictEqual(coordKeys.sort(), ['1:2', '2:1', '2:2'], '应跳过已占用的 1排1号');
     // 事务项内的语句经连接层统一做 $N→? 归一:语句构造器输出 $N 占位符,
     // 而驱动未开 namedPlaceholders,原样发出会报 Unknown column '$1' 20261021 新增,
     assert.ok(!inserts[0].sql.includes('$1'), '事务项内语句应已归一为 ? 占位符');
     assert.strictEqual((inserts[0].sql.match(/\?/g) || []).length, inserts[0].params.length, '占位符与参数个数应一致');
+  } finally {
+    server.close();
+    database.resetPoolForTesting();
+  }
+});
+
+// 范围修改上限(审查修复 20261021 二轮 P1-10):modify=2 时排×号的乘积同样由前端任意给定,
+// 原写法这条 UPDATE 不做任何限制,一排/号从 1 填到 99999 就是一条锁住整片墓位的长事务,
+// 超限时必须 400 且不发出任何语句(而不是先改再报错),
+test('room/save update: 范围修改超过上限时 400 且不发任何语句', async () => {
+  const mockPool = createMockPool([]);
+  database.setPoolForTesting(mockPool);
+
+  const roomSave = require('../room/save');
+  const { server, base } = startServer(roomSave, '/api/room-save');
+  try {
+    const response = await fetch(`${base}/api/room-save/update`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ modify: '2', region: '福东', park: '一园', yNum: 1, yNumTo: 50, xNum: 1, xNumTo: 50 }),
+    });
+    assert.strictEqual(response.status, 400);
+    const body = await response.json();
+    assert.ok(/上限/.test(body.error), `应答应说明超限原因,实际: ${body.error}`);
+    assert.strictEqual(mockPool.calls.length, 0, '超限时不应发出任何语句');
+  } finally {
+    server.close();
+    database.resetPoolForTesting();
+  }
+});
+
+// 上限内的范围修改仍照常执行(防止把守卫改成“一刷子全拦”),
+test('room/save update: 上限内的范围修改发出单条条件 UPDATE', async () => {
+  const calls = [];
+  database.setPoolForTesting({
+    async query(sql, params) {
+      calls.push({ sql, params });
+      // 写操作按 OkPacket 形状回包(范围内 2×2=4 个墓位全部更新),
+      return [{ affectedRows: 4 }];
+    },
+  });
+
+  const roomSave = require('../room/save');
+  const { server, base } = startServer(roomSave, '/api/room-save');
+  try {
+    const response = await fetch(`${base}/api/room-save/update`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ modify: '2', region: '福东', park: '一园', yNum: 1, yNumTo: 2, xNum: 1, xNumTo: 2, remark: '统一备注' }),
+    });
+    assert.strictEqual(response.status, 200);
+    assert.strictEqual(calls.length, 1, '范围修改应是一条语句而非逐行更新');
+    assert.ok(calls[0].sql.startsWith('update gm_data_001.room set'));
+    assert.ok(calls[0].sql.includes('xNum >= ? and xNum <= ? and yNum >= ? and yNum <= ? and region = ? and park = ?'));
+    assert.ok(!calls[0].sql.includes('xyNumber'), '多条修改不得覆写统一编号');
   } finally {
     server.close();
     database.resetPoolForTesting();
@@ -365,6 +426,57 @@ test('login: 同一手机号命中多个园区且未指定园区时拒绝登录'
     assert.ok(String(body.message).includes('个园区账号'), '应提示需要区分园区');
     // 查候选集的 SQL 必须带固定排序,不能依赖引擎返回顺序
     assert.ok(mockPool.calls[0].sql.includes('ORDER BY b.dataBaseName'));
+  } finally {
+    server.close();
+  }
+});
+
+// 存量口令升级必须拿“本次提交的明文”重哈希:旧写法拿库中存值去哈希,对 bcrypt 存量相当于把哈希当明文再哈希,
+// 一次登录就把用户口令彻底弄坏(审查修复 20261021 二轮 P1-6),
+test('login: 存量 bcrypt 口令登录成功后升级为 scrypt(基于提交的明文重哈希)', async () => {
+  const bcrypt = require('bcryptjs');
+  const legacy = bcrypt.hashSync('pass-123', 4);
+  const mockPool = createMockPool({
+    routes: [
+      [
+        'FROM gm_data_000.operator a,gm_data_000.account b',
+        [
+          {
+            userid: 1001,
+            username: '张三',
+            phone: '13800138011',
+            dataBaseName: 'gm_data_001',
+            accountName: '某陵园',
+            isAccount: 1,
+            password: legacy,
+            termYears: '',
+          },
+        ],
+      ],
+    ],
+  });
+  database.setPoolForTesting(mockPool);
+
+  const login = require('../login');
+  const { server, base } = startServer(login, '/api/login');
+  try {
+    const response = await fetch(`${base}/api/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: '13800138011', password: 'pass-123' }),
+    });
+    assert.strictEqual(response.status, 200, '存量 bcrypt 口令应能正常登录');
+
+    // 升级走 fire-and-forget(失败不阻断本次登录),给它一个等待窗口落库,
+    let upgrade = null;
+    for (let i = 0; i < 100 && !upgrade; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      upgrade = mockPool.calls.find((call) => call.sql.includes('UPDATE gm_data_000.operator SET password')) || null;
+    }
+    assert.ok(upgrade, '校验通过后应把存量口令升级为 scrypt 存储');
+    assert.ok(String(upgrade.params[0]).startsWith('scrypt$'), '升级后的存储形式应为 scrypt');
+    assert.strictEqual(await require('../public').verifyPassword('pass-123', upgrade.params[0]), true, '升级必须基于本次提交的明文');
+    assert.strictEqual(upgrade.params[1], 1001, '按 userid 定位待升级的行');
   } finally {
     server.close();
   }
@@ -903,6 +1015,38 @@ test('roomQuery/list: count 单表取数,日期与关键词走 EXISTS,不再全�
   }
 });
 
+// 总数短 TTL 复用(审查修复 20261021 二轮 P2-14):同一筛选条件下翻到第二页时总数根本不会变,
+// 而这条 COUNT(*) 在大表上是整片扫描;现只重跑本页取数那一条语句,并且两条语句并发发出而不是串行等待, 20261021 新增,
+test('roomQuery/list: 同一筛选条件翻页复用总数,不再重跑 COUNT', async () => {
+  const mockPool = createMockPool({ routes: [['COUNT(*) AS total', [{ total: 7 }]], ['FROM gm_data_001.room r WHERE', []]] });
+  database.setPoolForTesting(mockPool);
+
+  const roomQuery = require('../roomQuery/query');
+  const { server, base } = startServer(roomQuery, '/api/room-query');
+  try {
+    await fetch(`${base}/api/room-query/list?region=%E7%A6%8F%E4%B8%9C&current=1&pageSize=20`);
+    assert.strictEqual(mockPool.calls.filter((call) => call.sql.includes('COUNT(*) AS total')).length, 1, '第一页应查一次总数');
+    const callsAfterFirstPage = mockPool.calls.length;
+    assert.strictEqual(callsAfterFirstPage, 2, '第一页共两条语句(count + 取页)');
+
+    const second = await fetch(`${base}/api/room-query/list?region=%E7%A6%8F%E4%B8%9C&current=2&pageSize=20`);
+    assert.strictEqual(second.status, 200);
+    const body = await second.json();
+    assert.strictEqual(body.data.total, 7, '第二页总数应来自缓存且数值与首屏一致');
+    assert.strictEqual(mockPool.calls.filter((call) => call.sql.includes('COUNT(*) AS total')).length, 1, '翻页不应重跑 COUNT');
+    assert.strictEqual(mockPool.calls.length, callsAfterFirstPage + 1, '第二页只多发一条取数语句');
+    const secondDataCall = mockPool.calls[mockPool.calls.length - 1];
+    assert.strictEqual(secondDataCall.params[secondDataCall.params.length - 1], 20, '第二页 offset 应为 (current-1)*pageSize');
+
+    // 换了筛选条件就是另一个总数,必须回源重算,不能把上一个筛选条件的总数直接给用户, 20261021 新增,
+    await fetch(`${base}/api/room-query/list?region=%E7%A6%8F%E8%A5%BF&current=1&pageSize=20`);
+    assert.strictEqual(mockPool.calls.filter((call) => call.sql.includes('COUNT(*) AS total')).length, 2, '筛选条件变化应重新回源');
+  } finally {
+    server.close();
+    database.resetPoolForTesting();
+  }
+});
+
 // 响应信封统一(审查修复 20261021 P1-5):全站历史手写 `json({ error })` 经 normalizeEnvelope 补齐 code/message,
 // 0 行更新不再是 `code: 0`+404 的矛盾体,前端无论读 message 还是读 error 都能拿到可读文案,
 test('响应信封: 历史 {error} 写法与 0 行更新都输出可用 code/message', async () => {
@@ -1355,4 +1499,152 @@ test('rbac.requireRegionScope: 操作员区域分配写操作放行,普通业务
   assert.strictEqual(denyRes.code, 403, '普通业务越权区域应 403');
 
   database.resetPoolForTesting();
+});
+
+// ==================== 详情聚合放行矩阵(审查修复 20261021 二轮 P1-3) ====================
+// 取注册表里真实的守卫条目与真实路由挂载单个前缀(不在测试里重抄一遍“先归属后菜单”的组装顺序),
+// 只把权限查询的返回行改成“按本次提交的菜单名是否已授权”判定,以此构造“只开通下葬菜单”这类
+// 现实中大量存在的部分授权账号:迁出前缀的详情路径此前未登记宽松口径,这类账号点详情整体打不开,
+function startRegistryApp(entryPath, options = {}) {
+  const routeRegistry = require('../routeRegistry');
+  const { authorizedMenus = [], operatorRegions, businessRows = [{ idRoom: 1 }] } = options;
+  const entry = routeRegistry.ROUTES.find((item) => item.path === entryPath);
+  assert.ok(entry, `路由注册表缺少 ${entryPath} 条目`);
+  const calls = [];
+  // mock 池的 query 必须返回 mysql2 风格的 [行数组] 元组,故命中行集均先存成数组再套一层返回, 20261021 新增,
+  const hitRows = [{ 1: 1 }];
+  database.setPoolForTesting({
+    calls,
+    async query(sql, params) {
+      calls.push({ sql, params });
+      const text = String(sql);
+      if (text.includes('operator_power')) {
+        // 参数顺序为 [userId, ...菜单名]:命中与否取决于本次守卫提交的菜单集合里有没有已授权菜单,
+        const menuNames = (params || []).slice(1).map(String);
+        return [menuNames.some((name) => authorizedMenus.includes(name)) ? hitRows : []];
+      }
+      if (text.includes('gm_data_000.menu')) {
+        // 菜单存在性检查恒命中:使 403 文案稳定落在“缺少该菜单操作权限”,便于断言拒绝原因,
+        return [hitRows];
+      }
+      return [businessRows];
+    },
+  });
+  const app = express();
+  app.use((req, res, next) => {
+    req.data = { dataBase: 'gm_data_001', userName: 'tester', phone: '13800138000', userId: 2300, isAccount: 0 };
+    // 区域名单真实链路上由 requireRegionScope 注入,此处直接给定,单独验证“详情放行不放宽区域归属”,
+    if (Array.isArray(operatorRegions)) {
+      req.operatorRegions = operatorRegions;
+    }
+    next();
+  });
+  for (const guard of entry.guards || []) {
+    const middlewares = routeRegistry.buildGuardMiddlewares(guard);
+    if (middlewares.length > 0) {
+      app.use(routeRegistry.buildMountPath(entry.path, guard.at), ...middlewares);
+    }
+  }
+  app.use(entry.path, entry.router);
+  const server = app.listen(0);
+  return { server, base: `http://127.0.0.1:${server.address().port}`, calls };
+}
+
+test('P1-3 详情聚合: 仅具下葬菜单的操作员可按墓位取迁出记录,同前缀列表路径仍严格校验', async () => {
+  const { server, base, calls } = startRegistryApp('/api/transferOut-query', { authorizedMenus: ['buried'] });
+  try {
+    const detail = await fetch(`${base}/api/transferOut-query/?idRoom=1`);
+    assert.strictEqual(detail.status, 200, '详情第 7 路(迁出)应被“任一详情页菜单”放行');
+    const detailBody = await detail.json();
+    assert.ok(Array.isArray(detailBody.data.list), '应返回该墓位的迁出记录列表');
+    const powerSqls = () => calls.filter((call) => String(call.sql).includes('operator_power'));
+    assert.strictEqual(powerSqls().length, 1, '详情放行只需一次权限查询');
+    assert.ok(powerSqls()[0].params.slice(1).includes('transferOutQuery'), '详情口径应带上详情页菜单全集');
+
+    // 宽松口径只覆盖白名单里的详情取数路径:同一前缀的迁出列表仍要求迁出业务页/迁出查询页菜单,
+    const callsBeforeList = calls.length;
+    const list = await fetch(`${base}/api/transferOut-query/list?current=1&pageSize=20`);
+    assert.strictEqual(list.status, 403, '非详情路径不应被升级成宽松口径');
+    const listBody = await list.json();
+    assert.ok(listBody.error.includes('缺少该菜单操作权限'), `拒绝原因应为缺菜单权限:${listBody.error}`);
+    const lastPower = powerSqls()[powerSqls().length - 1];
+    assert.deepStrictEqual(lastPower.params.slice(1), ['transferOut', 'transferOutQuery'], '列表应按本前缀自身菜单判定');
+    // 只看过列表请求新增的那几条语句:详情请求已先发过一次 transfer_out 取数,不能算到拦截头上, 20261021 新增,
+    assert.ok(
+      !calls.slice(callsBeforeList).some((call) => String(call.sql).includes('gm_data_001.transfer_out')),
+      '被守卫拦下后不应再发业务取数',
+    );
+  } finally {
+    server.close();
+  }
+});
+
+test('P1-3 详情聚合: 白名单外的路径形状回到严格口径,白名单内的真实路径照常放行', async () => {
+  // 旧判定按“路径等于 /idList”猜测,凡是挂了 queryDetail 的前缀碰到该形状都走宽松口径,
+  // 而 /idList 只在 room-query 上存在(本前缀根本没这条路由),现按登记项逐条精确匹配,
+  const { server, base, calls } = startRegistryApp('/api/sale-query', { authorizedMenus: ['buried'] });
+  try {
+    const spoof = await fetch(`${base}/api/sale-query/idList?idRoom=1`);
+    assert.strictEqual(spoof.status, 403, '未登记的形状不应被当成详情路径');
+    const power = calls.find((call) => String(call.sql).includes('operator_power'));
+    assert.deepStrictEqual(power.params.slice(1), ['sale'], '应只按本前缀登记的单菜单严格判定');
+
+    // 白名单内的真实详情路径必须仍然放行,否则收窄就把自家详情页一并关掉了,
+    const okDetail = await fetch(`${base}/api/sale-query/get-by-room?idRoom=1`);
+    assert.strictEqual(okDetail.status, 200, '已登记的详情路径不应被收窄误伤');
+  } finally {
+    server.close();
+  }
+});
+
+test('P1-3 详情聚合: 缺 idRoom、非数值 idRoom 与非 GET 请求都不升级宽松口径', async () => {
+  // 只授权销售菜单:下葬前缀的严格口径(menu=buried)必然 403,据此反证本次请求是否走了详情宽松口径,
+  const { server, base, calls } = startRegistryApp('/api/buried-query', { authorizedMenus: ['sale'] });
+  try {
+    assert.strictEqual((await fetch(`${base}/api/buried-query/`)).status, 403, '不带 idRoom 就不是详情取数,不该借详情口径');
+    assert.strictEqual((await fetch(`${base}/api/buried-query/?idRoom=abc`)).status, 403, 'idRoom 非数值时不该放大权限口径');
+    const post = await fetch(`${base}/api/buried-query/?idRoom=1`, { method: 'POST' });
+    assert.strictEqual(post.status, 403, '详情放行只针对 GET 取数,写请求一律严格');
+
+    // 真正的详情取数仍放行(正向对照:证明上面三条 403 不是把详情路径整体堵死),
+    assert.strictEqual((await fetch(`${base}/api/buried-query/?idRoom=1`)).status, 200);
+
+    const powerCalls = calls.filter((call) => String(call.sql).includes('operator_power')).map((call) => call.params.slice(1));
+    assert.strictEqual(powerCalls.length, 2, '严格口径命中缓存只打一次,详情口径另打一次');
+    assert.ok(powerCalls.some((names) => names.length === 1 && names[0] === 'buried'), '拦截请求应按单菜单 buried 判定');
+    assert.ok(powerCalls.some((names) => names.length > 10), '放行请求应按详情页菜单全集判定');
+  } finally {
+    server.close();
+  }
+});
+
+test('P1-3 详情聚合: 宽松口径只放宽菜单层,限定区域操作员读它区墓位迁出记录仍被归属守卫拦下', async () => {
+  // 本前缀的裸 / 此前既没登记详情放行也没有区域归属校验:限定区域的操作员可借详情接口读它区迁出记录,
+  const denied = startRegistryApp('/api/transferOut-query', {
+    authorizedMenus: ['buried'],
+    operatorRegions: ['福西'],
+    businessRows: [{ region: '福东', idTransfer: 9 }],
+  });
+  try {
+    const response = await fetch(`${denied.base}/api/transferOut-query/?idRoom=1`);
+    assert.strictEqual(response.status, 403, '跨区域的详情取数应被归属守卫拦下');
+    const body = await response.json();
+    assert.ok(body.error.includes('不属于当前区域'), `拒绝原因应为区域归属:${body.error}`);
+    assert.ok(!denied.calls.some((call) => String(call.sql).includes('operator_power')), '归属守卫应排在菜单守卫之前');
+    assert.ok(!denied.calls.some((call) => String(call.sql).includes('gm_data_001.transfer_out')), '拦下后不应再发业务取数');
+  } finally {
+    denied.server.close();
+  }
+
+  const allowed = startRegistryApp('/api/transferOut-query', {
+    authorizedMenus: ['buried'],
+    operatorRegions: ['福东'],
+    businessRows: [{ region: '福东', idTransfer: 9 }],
+  });
+  try {
+    const ok = await fetch(`${allowed.base}/api/transferOut-query/?idRoom=1`);
+    assert.strictEqual(ok.status, 200, '同区域墓位的详情取数应正常放行');
+  } finally {
+    allowed.server.close();
+  }
 });

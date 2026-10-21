@@ -45,9 +45,6 @@ router.get('/list', async (req, res) => {
     const countSql = 'SELECT COUNT(*) AS total FROM ' + req.data.dataBase + '.room r WHERE ' + whereSql;
 
     try {
-        const countResults = await pool.query(countSql, params);
-        const total = countResults[0].total;
-
         const dataSql = 'SELECT r.idRoom, r.region, r.park, r.xyNumber, r.endDate, r.contacts, ' +
             '(SELECT LEFT(GROUP_CONCAT(c.contactsPhone ORDER BY c.idContacts ASC SEPARATOR \' \'), 200) ' +
             'FROM ' + req.data.dataBase + '.contacts c WHERE c.idRoom = r.idRoom AND c.isDeleted = 0) AS contactsPhone ' +
@@ -56,9 +53,14 @@ router.get('/list', async (req, res) => {
             'ORDER BY r.endDate DESC, r.idRoom DESC ' +
             'LIMIT ? OFFSET ?';
 
-        const results = await pool.query(dataSql, [...params, pageSize, (current - 1) * pageSize]);
+        // 总数短 TTL 复用并与取数并发发出(审查修复 20261021 二轮 P2-14):同一筛选条件下翻页时总数不会变,
+        // 而本页取数每行还要走一次联系人电话聚合子查询,串行两段就是白等一个往返, 20261021 改造,
+        const [aggregate, results] = await Promise.all([
+            public.queryAggregate(pool.query, { database: req.data.dataBase, sql: countSql, params }),
+            pool.query(dataSql, [...params, pageSize, (current - 1) * pageSize]),
+        ]);
         // 分页结果：list 当前页数据，total 总记录数供前端滚动加载使用 20260915 新增
-        return res.json({ code: 0, data: { list: results, total } });
+        return res.json({ code: 0, data: { list: results, total: aggregate.total } });
     } catch (error) {
         return public.handleQueryError(res, error);
     }
