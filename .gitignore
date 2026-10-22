@@ -19,3 +19,6 @@ Thumbs.db
 *.tmp
 *.swp
 *.bundle
+
+# add-indexes.js --all-tenants 生成的存量重复清单(含墓位编号/坐标,不入库)
+scripts/add-indexes-duplicates.txt

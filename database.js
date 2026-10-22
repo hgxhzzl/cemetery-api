@@ -188,6 +188,18 @@ module.exports = {
   query,
   withTransaction,
   end: () => activePool.end(),
+  // 连接池占用快照(审查修复 20261021 三轮 P2-6):供 /health 探活读取,取自 mysql2 连接池内部计数
+  // (无官方统计 API),任一环节取不到都安全回 null(测试注入的 mock 池没有这些字段),不抛错,
+  poolStats: () => {
+    const raw = activePool && activePool.pool;
+    if (!raw || !Array.isArray(raw._allConnections)) {
+      return null;
+    }
+    const total = raw._allConnections.length;
+    const idle = Array.isArray(raw._freeConnections) ? raw._freeConnections.length : 0;
+    const waiting = Array.isArray(raw._connectionQueue) ? raw._connectionQueue.length : 0;
+    return { total, idle, borrowed: total - idle, waiting };
+  },
   // 测试专用:注入 mock 连接池并恢复真实池,生产路径不受影响 20260917 新增,
   setPoolForTesting: (pool) => {
     activePool = pool;

@@ -87,10 +87,7 @@ INSERT INTO `account_power` VALUES ('102106', 1, 0, 0, 0, 0, 0, 0, 'menu.cardCol
 INSERT INTO `account_power` VALUES ('103100', 1, 0, 0, 0, 0, 0, 0, 'menu.operate', 'gm_data_000', 1, '', 'menu.operateDescribe');
 INSERT INTO `account_power` VALUES ('103101', 1, 1, 1, 1, 0, 0, 0, 'menu.gravePlotBusiness', 'gm_data_000', 2, '', 'menu.gravePlotBusinessDescribe');
 INSERT INTO `account_power` VALUES ('103107', 1, 1, 1, 0, 0, 0, 0, 'menu.room', 'gm_data_000', 2, '', 'menu.roomDescribe');
-INSERT INTO `account_power` VALUES ('103102', 1, 1, 1, 1, 0, 0, 0, 'menu.sale', 'gm_data_000', 2, '', 'menu.saleDescribe');
-INSERT INTO `account_power` VALUES ('103103', 1, 1, 1, 1, 0, 0, 0, 'menu.buried', 'gm_data_000', 2, '', 'menu.buriedDescribe');
 INSERT INTO `account_power` VALUES ('103104', 1, 1, 1, 1, 0, 0, 0, 'menu.reserve', 'gm_data_000', 2, '', 'menu.reserveDescribe');
-INSERT INTO `account_power` VALUES ('103105', 1, 1, 1, 1, 0, 0, 0, 'menu.contacts', 'gm_data_000', 2, '', 'menu.contactsDescribe');
 INSERT INTO `account_power` VALUES ('103106', 1, 1, 1, 1, 0, 0, 0, 'menu.transferOut', 'gm_data_000', 2, '', 'menu.transferOutDescribe');
 INSERT INTO `account_power` VALUES ('104100', 1, 0, 0, 0, 0, 0, 0, 'menu.fee', 'gm_data_000', 1, '', 'menu.feeDescribe');
 INSERT INTO `account_power` VALUES ('103108', 1, 1, 1, 1, 0, 0, 0, 'menu.admifee', 'gm_data_000', 2, '', 'menu.admifeeDescribe');
@@ -166,10 +163,9 @@ INSERT INTO `menu` VALUES ('102106', 'cardColor', 'cardColor', '/cardColor/index
 INSERT INTO `menu` VALUES ('103100', '/operate', 'operate', 'LAYOUT', '/operate/base', 'assignment', '0', '墓区业务', 'Cemetery Business');
 INSERT INTO `menu` VALUES ('103101', 'gravePlotBusiness', 'gravePlotBusiness', '/gravePlotBusiness/index', '', NULL, '103100', '墓位业务', 'Grave Plot Business');
 INSERT INTO `menu` VALUES ('103107', 'room', 'room', '/room/index', '', NULL, '103100', '墓位设置', 'Cemetery Area Settings');
-INSERT INTO `menu` VALUES ('103102', 'sale', 'sale', '/sale/index', '', NULL, '103100', '墓区销售', 'Cemetery Sales');
-INSERT INTO `menu` VALUES ('103103', 'buried', 'buried', '/buried/index', '', NULL, '103100', '墓区下葬', 'Cemetery Burials');
+-- 103102 墓区销售 / 103103 墓区下葬 / 103105 墓位联系 已于 20261021 三轮下线(功能由 103101 墓位业务的
+-- 购墓人/下葬者/联系人形态承接),对应接口与前端页面同步删除,不要再把这三行菜单加回,
 INSERT INTO `menu` VALUES ('103104', 'reserve', 'reserve', '/reserve/index', '', NULL, '103100', '墓区预定', 'Cemetery Reservations');
-INSERT INTO `menu` VALUES ('103105', 'contacts', 'contacts', '/contacts/index', '', NULL, '103100', '墓位联系', 'Plot Contacts');
 INSERT INTO `menu` VALUES ('103106', 'transferOut', 'transferOut', '/transferOut/index', '', NULL, '103100', '墓位迁出', 'Plot Transfer Out');
 INSERT INTO `menu` VALUES ('104100', '/fee', 'fee', 'LAYOUT', '/fee/base', '\r\nalarm-add', '0', '收费管理', 'Fee Management');
 INSERT INTO `menu` VALUES ('103108', 'adminfee', 'adminfee', '/adminfee/index', '', NULL, '103100', '管理费用收款', 'Admin Fee Collection');
@@ -244,10 +240,7 @@ INSERT INTO `operator_power` VALUES (100006, 1000, '102103', 1, 0, 0, 0, 0, 0, 0
 INSERT INTO `operator_power` VALUES (100007, 1000, '102104', 1, 1, 1, 1, 0, 0, 1);
 INSERT INTO `operator_power` VALUES (100008, 1000, '103100', 1, 0, 0, 0, 0, 0, 0);
 INSERT INTO `operator_power` VALUES (100009, 1000, '103107', 1, 1, 1, 0, 0, 1, 0);
-INSERT INTO `operator_power` VALUES (100010, 1000, '103102', 1, 1, 1, 1, 0, 0, 0);
-INSERT INTO `operator_power` VALUES (100011, 1000, '103103', 1, 1, 1, 1, 0, 0, 0);
 INSERT INTO `operator_power` VALUES (100012, 1000, '103104', 1, 1, 1, 1, 0, 0, 0);
-INSERT INTO `operator_power` VALUES (100013, 1000, '103105', 1, 1, 1, 1, 0, 0, 0);
 INSERT INTO `operator_power` VALUES (100014, 1000, '103106', 1, 1, 1, 1, 0, 0, 0);
 INSERT INTO `operator_power` VALUES (100015, 1000, '104100', 1, 0, 0, 0, 0, 0, 0);
 INSERT INTO `operator_power` VALUES (100016, 1000, '103108', 1, 1, 1, 1, 0, 0, 0);

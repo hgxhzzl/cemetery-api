@@ -40,9 +40,8 @@ const cardColorSaveROutes = require('./cardColor/save');
 const roomQueryROutes = require('./room/query');
 const roomSaveROutes = require('./room/save');
 const roomDeleteROutes = require('./room/delete');
-// 销售路径
-const saleSaveROutes = require('./sale/save');
-const saleDeleteROutes = require('./sale/delete');
+// 销售取数路径(墓区销售登记页 103102 已于三轮下线,本前缀只保留墓位业务详情聚合与
+// 销售查询页需要的按墓位取数,新建/修改/作废统一走 gravePlotBusiness 入口),
 const saleQueryROutes = require('./sale/query');
 // 销售统计查询路径
 const saleQueryStatsRoutes = require('./saleQuery/query');
@@ -60,10 +59,8 @@ const managementPeriodRoutes = require('./managementPeriod/query');
 const managementPeriodSaveRoutes = require('./managementPeriod/save');
 // 首页路径
 const dashboardQueryROutes = require('./dashboard/query');
-// 下葬路径
+// 下葬取数路径(墓区下葬登记页 103103 已于三轮下线,仅保留详情聚合取数),
 const buriedQueryROutes = require('./buried/query');
-const buriedSaveROutes = require('./buried/save');
-const buriedDeleteROutes = require('./buried/delete');
 // 迁出路径
 const transferOutQueryROutes = require('./transferOut/query');
 const transferOutSaveROutes = require('./transferOut/save');
@@ -72,10 +69,8 @@ const transferOutDeleteROutes = require('./transferOut/delete');
 const adminfeeQueryROutes = require('./adminfee/query');
 const adminfeeSaveROutes = require('./adminfee/save');
 const adminfeeDeleteROutes = require('./adminfee/delete');
-// 墓位联系人路径
+// 墓位联系人取数路径(墓位联系登记页 103105 已于三轮下线,仅保留详情聚合取数),
 const contactsQueryROutes = require('./contacts/query');
-const contactsSaveROutes = require('./contacts/save');
-const contactsDeleteROutes = require('./contacts/delete');
 // 预定路径
 const reserveSaveROutes = require('./reserve/save');
 const reserveQueryROutes = require('./reserve/query');
@@ -89,11 +84,13 @@ const menuROutes = require('./menu');
 
 // 主键记录的区域归属校验作用域:room 表直查自身 region,其余业务表 JOIN room 取 region,
 // 表名/主键字段/入参名均为代码侧固定字符串(不接受请求输入),迁移注册表时逐字保留原口径,
+// 新建(/insert)同样挂 ownRoomScope:新记录尚无主键可查,但 body 里必带目标墓位 idRoom,
+// 归属即按该墓位的 region 判定(与 /update 同口径);前端可选墓位已由区域名单收窄
+// (墓位列表 region 等值 + 下拉 filterByOperatorRegions + 显式 region 参数由 requireRegionScope 拦),
+// 因此本道闸只封住绕过界面直调接口的跳区代录,正常操作零行为变化(审查修复 20261021 三轮 P1-2),
 const ownRoomScope = { table: 'room', idParam: 'idRoom' };
-const ownBuriedScope = { table: 'buried', idField: 'idBuried', idParam: 'idBuried' };
 const ownTransferOutScope = { table: 'transfer_out', idField: 'idTransfer', idParam: 'idTransfer' };
 const ownAdminfeeScope = { table: 'adminfee', idField: 'idAdminfee', idParam: 'idAdminfee' };
-const ownContactsScope = { table: 'contacts', idField: 'idContacts', idParam: 'idContacts' };
 
 // 守卫声明字段含义:
 //   menu         - 需具备该菜单的 useMenu(整前缀或 at 指定的子路径)
@@ -112,6 +109,15 @@ const ownContactsScope = { table: 'contacts', idField: 'idContacts', idParam: 'i
 // 条目字段 loginOnlyWrites:声明“该条目的写接口(POST/PUT/DELETE)历史上就只要求登录”,
 // 必须写明理由;未声明的条目内出现未登记守卫的写接口会在启动时被 mountApiRoutes 拒绝,
 // 这样“新增接口漏一行守卫”从线上的无鉴权裸奔变成启动即失败(审查修复 20261021 P1-4),
+// 条目字段 globalScope:声明“该条目读写的是 gm_data_000 里的全局共享表(不按租户划分,通常也没有 region 列)”,
+// 值填表名(如 gm_data_000.contract)。这类接口只要对租户开放一次,就是跨租户读写全平台数据,而“没给租户
+// 勾该菜单”只是数据库里的一行配置,改一次配置即可绕过,故必须由代码兜底:体检要求条目存在一条整前缀
+// platformOnly 守卫,并禁止再挂 ownership(全局表无从查 region,挂了也只会静默放行)。
+// 「用户管理」子树(101101 账户信息 / 101102 合同列表)与设备白名单均属此类(审查修复 20261021 三轮 P1-1),
+// 条目字段 insertOwnershipExempt:声明“本条目的 /insert 确实不能按区域归属收窄”,必须写明理由。
+// 体检规则是“同条目 /update 已挂 ownership 时,/insert 不得空着”(三轮 P1-2),但批量建位的
+// /insert 无主键可查、region 就在 body 里,属合法例外;声明了理由却已无需要豁免的 /insert 同样会报错,
+// 避免理由与实际实现漂移,
 // 区域归属校验在 index.js 里原本统一排在所有菜单权限之前,现按条目内顺序挂载:
 // 同一前缀下“归属 → 权限”的相对顺序保持不变,跨前缀之间互不影响(Express 按挂载前缀各自匹配),
 const ROUTES = [
@@ -135,15 +141,22 @@ const ROUTES = [
     path: '/api/device',
     router: device.router,
     note: '登录设备白名单登记/列表/停用',
+    globalScope: 'gm_data_000.device',
     guards: [{ at: '', platformOnly: true }],
   },
 
-  // ==================== 合同(菜单 101102 合同列表) ====================
+  // ==================== 合同(菜单 101102 合同列表,属「用户管理」子树,仅 gm_data_000 平台账户) ====================
+  // contract 表在 gm_data_000 全局库,且查询/更新语句不带任何租户条件(contract/query.js 的整库 SELECT、
+  // contract/save.js 的按 idContract 直改),此前条目只校验菜单权限——等价于“哪个租户被勾上合同列表,
+  // 哪个租户就能读改全平台所有租户的合同”;现按同子树的 account/accountPower 口径收口为仅平台管理员,
+  // 种子平台账户即 isAccount=1 + dataBaseName=gm_data_000(rbac.isPlatformAdmin 判据),故对既有可用者零行为变化,
   {
     path: '/api/contract-save',
     router: contractSaveROutes,
-    note: '合同新建/修改',
+    note: '合同新建/修改(仅平台管理员)',
+    globalScope: 'gm_data_000.contract',
     guards: [
+      { at: '', platformOnly: true },
       { at: '/insert', menu: 'contract' },
       { at: '/update', menu: 'contract' },
     ],
@@ -151,14 +164,16 @@ const ROUTES = [
   {
     path: '/api/contract-query',
     router: contractQueryROutes,
-    note: '合同查询(contract 表在 gm_data_000 全局库无 region 列,不做区域归属)',
-    guards: [{ at: '', menu: 'contract' }],
+    note: '合同查询(仅平台管理员;contract 在 gm_data_000 全局库无租户与 region 列,不做区域归属)',
+    globalScope: 'gm_data_000.contract',
+    guards: [{ at: '', platformOnly: true }, { at: '', menu: 'contract' }],
   },
   {
     path: '/api/contract-delete',
     router: contractDeleteROutes,
-    note: '合同删除',
-    guards: [{ at: '', menu: 'contract' }],
+    note: '合同删除(仅平台管理员)',
+    globalScope: 'gm_data_000.contract',
+    guards: [{ at: '', platformOnly: true }, { at: '', menu: 'contract' }],
   },
 
   // ==================== 账户(租户开户与资料:仅平台管理员) ====================
@@ -169,6 +184,7 @@ const ROUTES = [
     path: '/api/account-save',
     router: accountSaveROutes,
     note: '账户新建/修改/建库(仅平台管理员)',
+    globalScope: 'gm_data_000.account',
     innerGuards: ['platformAdmin'],
     guards: [{ at: '', platformOnly: true }],
   },
@@ -176,6 +192,7 @@ const ROUTES = [
     path: '/api/account-query',
     router: accountQueryROutes,
     note: '账户查询(仅平台管理员)',
+    globalScope: 'gm_data_000.account',
     innerGuards: ['platformAdmin'],
     guards: [{ at: '', platformOnly: true }],
   },
@@ -183,6 +200,7 @@ const ROUTES = [
     path: '/api/account-delete',
     router: accountDeleteROutes,
     note: '账户注销(级联删除该租户操作员与授权,仅平台管理员)',
+    globalScope: 'gm_data_000.account',
     innerGuards: ['platformAdmin'],
     guards: [{ at: '', platformOnly: true }],
   },
@@ -298,6 +316,7 @@ const ROUTES = [
     path: '/api/room-save',
     router: roomSaveROutes,
     note: '墓位新建(含批量建位)/修改',
+    insertOwnershipExempt: '新建墓位尚无主键可反查 region,而 body 直接携带 region,已由全局 requireRegionScope 按名单拦下(不在名单即 403)',
     guards: [
       { at: '/insert', menu: 'room' },
       { at: '/update', menu: 'room', ownership: ownRoomScope },
@@ -316,27 +335,16 @@ const ROUTES = [
     guards: [{ at: '', menu: 'room', ownership: ownRoomScope }],
   },
 
-  // ==================== 墓位销售(菜单 103102) ====================
-  {
-    path: '/api/sale-save',
-    router: saleSaveROutes,
-    note: '销售新建/修改',
-    guards: [
-      { at: '/insert', menu: 'sale' },
-      { at: '/update', menu: 'sale', ownership: ownRoomScope },
-    ],
-  },
+  // ==================== 销售取数(供墓位业务详情聚合与销售查询页) ====================
+  // 墓区销售登记页(菜单 103102)已于三轮下线,其新建/修改/作废接口随之从注册表摘除:
+  // 那条旁路既没有预定闸门也不派生下葬记录,与新页口径分叉(三轮 P1-3),销售写操作只保留
+  // /api/gravePlotBusiness-save 与 /api/gravePlotBusiness-cancelSale 两个入口,
+  // 本前缀只留详情取数,菜单改挂存活的「墓区销售查询」(105101)作为非详情路径的兜底口径,
   {
     path: '/api/sale-query',
     router: saleQueryROutes,
-    note: '销售记录取数',
-    guards: [{ at: '/get-by-room', ownership: ownRoomScope }, { at: '', menu: 'sale', queryDetail: true }],
-  },
-  {
-    path: '/api/sale-delete',
-    router: saleDeleteROutes,
-    note: '销售作废',
-    guards: [{ at: '', menu: 'sale', ownership: ownRoomScope }],
+    note: '销售记录取数(详情聚合;登记页已下线)',
+    guards: [{ at: '/get-by-room', ownership: ownRoomScope }, { at: '', menu: 'saleQuery', queryDetail: true }],
   },
 
   // ==================== 墓位业务(菜单 103101) ====================
@@ -345,7 +353,7 @@ const ROUTES = [
     router: gravePlotBusinessSaveROutes,
     note: '墓位业务新建/修改',
     guards: [
-      { at: '/insert', menu: 'gravePlotBusiness' },
+      { at: '/insert', menu: 'gravePlotBusiness', ownership: ownRoomScope },
       { at: '/update', menu: 'gravePlotBusiness', ownership: ownRoomScope },
     ],
   },
@@ -391,27 +399,14 @@ const ROUTES = [
     guards: [{ at: '', menu: 'managementPeriod' }],
   },
 
-  // ==================== 墓位下葬(菜单 103103) ====================
-  {
-    path: '/api/buried-save',
-    router: buriedSaveROutes,
-    note: '下葬新建/修改',
-    guards: [
-      { at: '/insert', menu: 'buried' },
-      { at: '/update', menu: 'buried', ownership: ownRoomScope },
-    ],
-  },
+  // ==================== 下葬取数(供墓位业务详情聚合与下葬查询页) ====================
+  // 墓区下葬登记页(菜单 103103)已下线:单条下葬记录的增删改均走 /api/gravePlotBusiness-{save,delete},
+  // 旧旁路不维护墓位锁定/联系人同步/管理期限重排,与新页双写只会让两套口径继续分叉,
   {
     path: '/api/buried-query',
     router: buriedQueryROutes,
-    note: '下葬记录取数',
-    guards: [{ at: '', menu: 'buried', queryDetail: true, ownership: ownRoomScope }],
-  },
-  {
-    path: '/api/buried-delete',
-    router: buriedDeleteROutes,
-    note: '下葬记录作废',
-    guards: [{ at: '', menu: 'buried', ownership: ownBuriedScope }],
+    note: '下葬记录取数(详情聚合;登记页已下线)',
+    guards: [{ at: '', menu: 'buriedQuery', queryDetail: true, ownership: ownRoomScope }],
   },
 
   // ==================== 墓位迁出(菜单 103106) ====================
@@ -420,7 +415,7 @@ const ROUTES = [
     router: transferOutSaveROutes,
     note: '迁出新建/修改',
     guards: [
-      { at: '/insert', menu: 'transferOut' },
+      { at: '/insert', menu: 'transferOut', ownership: ownRoomScope },
       { at: '/update', menu: 'transferOut', ownership: ownRoomScope },
     ],
   },
@@ -446,7 +441,7 @@ const ROUTES = [
     router: adminfeeSaveROutes,
     note: '管理费收款新建/修改',
     guards: [
-      { at: '/insert', menu: 'adminfee' },
+      { at: '/insert', menu: 'adminfee', ownership: ownRoomScope },
       { at: '/update', menu: 'adminfee', ownership: ownRoomScope },
     ],
   },
@@ -463,27 +458,14 @@ const ROUTES = [
     guards: [{ at: '', menu: 'adminfee', ownership: ownAdminfeeScope }],
   },
 
-  // ==================== 墓位联系人(菜单 103105) ====================
-  {
-    path: '/api/contacts-save',
-    router: contactsSaveROutes,
-    note: '联系人新建/修改',
-    guards: [
-      { at: '/insert', menu: 'contacts' },
-      { at: '/update', menu: 'contacts', ownership: ownRoomScope },
-    ],
-  },
+  // ==================== 联系人取数(供墓位业务详情聚合与联系人查询页) ====================
+  // 墓位联系登记页(菜单 103105)已下线:联系人的新增/修改/删除均走 /api/gravePlotBusiness-{save,delete}(type=contacts),
+  // 旧旁路不做同墓位重名拦截也不同步 room.contacts 聚合,
   {
     path: '/api/contacts-query',
     router: contactsQueryROutes,
-    note: '联系人取数',
-    guards: [{ at: '', menu: 'contacts', queryDetail: true, ownership: ownRoomScope }],
-  },
-  {
-    path: '/api/contacts-delete',
-    router: contactsDeleteROutes,
-    note: '联系人删除',
-    guards: [{ at: '', menu: 'contacts', ownership: ownContactsScope }],
+    note: '联系人取数(详情聚合;登记页已下线)',
+    guards: [{ at: '', menu: 'contactsQuery', queryDetail: true, ownership: ownRoomScope }],
   },
 
   // ==================== 墓位预定(菜单 103104) ====================
@@ -492,7 +474,7 @@ const ROUTES = [
     router: reserveSaveROutes,
     note: '预定新建/修改',
     guards: [
-      { at: '/insert', menu: 'reserve' },
+      { at: '/insert', menu: 'reserve', ownership: ownRoomScope },
       { at: '/update', menu: 'reserve', ownership: ownRoomScope },
     ],
   },
@@ -514,6 +496,7 @@ const ROUTES = [
     path: '/api/accountPower-save',
     router: accountPowerSaveROutes,
     note: '账户(租户)菜单权限保存(仅平台管理员)',
+    globalScope: 'gm_data_000.account',
     innerGuards: ['platformAdmin'],
     guards: [{ at: '', platformOnly: true }],
   },
@@ -521,6 +504,7 @@ const ROUTES = [
     path: '/api/accountPower-query',
     router: accountPowerQueryROutes,
     note: '账户菜单权限读取(仅平台管理员)',
+    globalScope: 'gm_data_000.account',
     innerGuards: ['platformAdmin'],
     guards: [{ at: '', platformOnly: true }],
   },
@@ -756,6 +740,42 @@ function auditRouteRegistry(routes = ROUTES) {
     const ghostInner = declaredInner.filter((kind) => !actualInner.includes(kind));
     if (ghostInner.length > 0) {
       violations.push(`条目 ${entry.path} 声明的 innerGuards 在 router 内部并不存在:${ghostInner.join(',')}(口径已与实际实现漂移)`);
+    }
+    // 全局共享表入口对账(审查修复 20261021 三轮 P1-1):字段含义见条目字段 globalScope 说明——
+    // “租户没被授该菜单”是数据层配置,改一行就能绕过;将其升为启动期硬约束,新登记一个全局表接口
+    // 却忘收权限时直接启动失败,而不是等到线上发生跨租户读取才发现,
+    if (entry.globalScope) {
+      const scopeLabel = String(entry.globalScope);
+      if (!guards.some((guard) => !guard.at && guard.platformOnly)) {
+        violations.push(`条目 ${entry.path} 读写全局共享表 ${scopeLabel},却未按整前缀声明 platformOnly(全局表接口漏一道锁即是跨租户读写全平台数据)`);
+      }
+      guards
+        .filter((guard) => guard.ownership)
+        .forEach((guard) =>
+          violations.push(
+            `条目 ${entry.path}${guard.at || ''} 为全局共享表 ${scopeLabel},不得声明 ownership(全局表没有 region 列可查,区域归属校验只会静默放行)`,
+          ),
+        );
+    }
+    // 新建与修改的区域归属必须成对(审查修复 20261021 三轮 P1-2 的机器约束):二轮收口水平越权时
+    // 只给 /update、/delete 挂了 ownership,/insert 集体漏着——“能改不能查”堵了,
+    // “不能改但能给别区新增”还开着。四个业务条目已补齐,本规则保证以后新模块再漏时启动即失败,
+    // 而不是靠人记住同一张表要改两处;全局表条目本就无 region 可查(上方已禁止 ownership),跳过,
+    if (!entry.globalScope) {
+      const ownedUpdateGuard = guards.find((guard) => /\/update$/.test(guard.at || '') && guard.ownership);
+      const unownedInserts = guards.filter((guard) => /\/insert$/.test(guard.at || '') && !guard.ownership);
+      const hasExempt = typeof entry.insertOwnershipExempt === 'string' && entry.insertOwnershipExempt.length > 0;
+      if (ownedUpdateGuard && unownedInserts.length > 0 && !hasExempt) {
+        unownedInserts.forEach((guard) =>
+          violations.push(
+            `条目 ${entry.path}${guard.at} 未声明 ownership,而同条目 ${ownedUpdateGuard.at} 已按区域归属收窄:跨区新建等于绕开同一道闸(确有豁免理由请写进条目字段 insertOwnershipExempt)`,
+          ),
+        );
+      }
+      // 反向对账:豁免理由不得长驻——一旦 /insert 补上了归属或条目本就无新建,理由就该跟着删掉,
+      if (hasExempt && (unownedInserts.length === 0 || !ownedUpdateGuard)) {
+        violations.push(`条目 ${entry.path} 声明了 insertOwnershipExempt 但已无需要豁免的 /insert(豁免理由已与实际实现漂移)`);
+      }
     }
     for (const route of listRouterRoutes(entry.router)) {
       const routeFullPath = normalizePath(entry.path + route.subPath);

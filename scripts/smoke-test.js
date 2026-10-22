@@ -169,6 +169,8 @@ async function main() {
     assert(body.data.list.length === 1, `account-query expected 1 item, got ${body.data.list.length}`);
   }));
 
+  // 合同与账户同为 gm_data_000 全局表接口(注册表已标 globalScope + 整前缀 platformOnly),
+  // 因此这两项探测只对平台账户有意义:换租户凭据跑到这里得到 403 属预期行为,不是回归(审查修复 20261021 三轮 P1-1),
   results.push(await checkJsonRoute('contract-query', '/api/contract-query', token, 200, (body) => {
     assert(body && body.code === 0, 'contract-query response missing code=0');
     assert(body.data && Array.isArray(body.data.list), 'contract-query response missing list');

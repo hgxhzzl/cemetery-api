@@ -195,4 +195,26 @@ function applyServerTimeouts(httpServer, limits = config.app) {
   };
 }
 
-module.exports = { securityHeaders, gzipJson, requestLog, notFound, finalError, attachRequestId, requestIdOf, applyServerTimeouts };
+// 健康探针(审查修复 20261021 三轮 P2-6):GET /health 供 nginx/监控/容器编排探活,不鉴权、不读业务数据,
+// 因此必须挂在鉴权与响应信封中间件之前(见 index.js),响应也不套 {code} 业务信封(运维直接看 HTTP 200)。
+// 内容包括进程存活(uptimeSeconds)、应用/Node 版本、连接池占用与排队、传输层超时生效值;
+// 全部外部依赖(池状态/超时回读/版本)由调用方注入,便于单测且不在此文件触碰数据库,
+function createHealthHandler(deps = {}) {
+  const startedAt = Date.now();
+  return function health(req, res) {
+    const pool = typeof deps.getPoolStats === 'function' ? deps.getPoolStats() : null;
+    const timeouts = typeof deps.getServerTimeouts === 'function' ? deps.getServerTimeouts() : null;
+    return res.status(200).json({
+      status: 'ok',
+      uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
+      version: deps.version || 'unknown',
+      node: process.version,
+      timestamp: new Date().toISOString(),
+      // 池状态取不到(测试 mock 池/未初始化)时明确标注 unavailable,而不是省略让监控误读为 0,
+      pool: pool || { unavailable: true },
+      timeouts: timeouts || undefined,
+    });
+  };
+}
+
+module.exports = { securityHeaders, gzipJson, requestLog, notFound, finalError, attachRequestId, requestIdOf, applyServerTimeouts, createHealthHandler };

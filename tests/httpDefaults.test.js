@@ -298,3 +298,32 @@ test('httpDefaults: applyServerTimeouts 按配置收紧连接超时且 0 值不�
   assert.ok(config.app.keepAliveTimeoutMs > 0, 'keepAliveTimeout 必须显式设置');
   assert.ok(config.app.slowRequestMs > 0, '慢请求告警阈值必须显式设置,否则 [slow-request] 分支永不进入');
 });
+
+// 健康探针(审查修复 20261021 三轮 P2-6):免鉴权、响应不套业务 {code} 信封,供 nginx/监控直接按 HTTP 200 探活;
+// 池占用与超时值均由注入提供,取不到池计数(mock 池)时应标注 unavailable 而不是省略(否则会被监控误读为 0),
+test('httpDefaults: GET /health 回 200 并透出存活/版本/池占用/超时生效值', async () => {
+  const app = createApp((router) => {
+    router.get('/health', httpDefaults.createHealthHandler({
+      version: 'cemetery-api@test',
+      getPoolStats: () => ({ total: 5, idle: 3, borrowed: 2, waiting: 1 }),
+      getServerTimeouts: () => ({ requestTimeout: 45000, headersTimeout: 12000, keepAliveTimeout: 4000 }),
+    }));
+    router.get('/health-nopool', httpDefaults.createHealthHandler({ version: 'x' }));
+  });
+
+  await withServer(app, async (base) => {
+    const response = await fetch(`${base}/health`);
+    assert.strictEqual(response.status, 200);
+    const body = await response.json();
+    assert.strictEqual(body.status, 'ok');
+    assert.strictEqual(body.version, 'cemetery-api@test');
+    assert.strictEqual(typeof body.uptimeSeconds, 'number');
+    assert.deepStrictEqual(body.pool, { total: 5, idle: 3, borrowed: 2, waiting: 1 });
+    assert.deepStrictEqual(body.timeouts, { requestTimeout: 45000, headersTimeout: 12000, keepAliveTimeout: 4000 });
+    assert.ok(!('code' in body), 'health 响应不应被业务 {code} 信封包裹');
+
+    const nopool = await (await fetch(`${base}/health-nopool`)).json();
+    assert.deepStrictEqual(nopool.pool, { unavailable: true }, '取不到池计数时应显式标注 unavailable');
+    assert.strictEqual(nopool.version, 'x');
+  });
+});

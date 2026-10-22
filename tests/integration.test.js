@@ -1,4 +1,4 @@
-// 业务事务联动集成测试:mock 连接池注入,断言 sale/buried 的 SQL 语句序列与冗余字段同步 20260917 新增,
+// 业务事务联动集成测试:mock 连接池注入,断言墓位业务各形态的 SQL 语句序列与冗余字段同步 20260917 新增,
 const test = require('node:test');
 const assert = require('node:assert');
 const express = require('express');
@@ -241,20 +241,17 @@ test('operator/save update: 非平台管理员提交的提权列被剔除,业务
   }
 });
 
-test('sale/delete: 软删销售 + 墓位回置未销售(清空buyer) + 软删联系人 + contacts聚合,同一事务', async () => {
-  // 20261018 ④ 改版后语句序列:先取活动销售(idSale+payer),再统计剩余非派生下葬,后接事务写 20261021 对齐既有失败用例,
-  const mockPool = createMockPool({
-    routes: [
-      ['FROM gm_data_001.sale', [{ idSale: 12, payer: '张三' }]],
-      ['from gm_data_001.buried', [{ cnt: 0, minBurial: null }]],
-    ],
-  });
+// 原 /api/sale-delete(墓区销售登记页的作废)已于三轮下线,销售作废的唯一入口改为墓位业务的取消销售;
+// 用例因此改钉现役链路,且取消销售的口径比旧接口更宽:把该墓位 6 张业务表的活动记录一并软删,
+// 只留一条“墓位整体回置”的断言而不再是“仅删 sale + 按付款人删联系人”,
+test('gravePlotBusiness/cancelSale: 作废销售逐表软删业务记录 + 墓位整体回置清空,同一事务', async () => {
+  const mockPool = createMockPool([]);
   database.setPoolForTesting(mockPool);
 
-  const saleDelete = require('../sale/delete');
-  const { server, base } = startServer(saleDelete, '/api/sale-delete');
+  const cancelSale = require('../gravePlotBusiness/cancelSale');
+  const { server, base } = startServer(cancelSale, '/api/gravePlotBusiness-cancelSale');
   try {
-    const response = await fetch(`${base}/api/sale-delete`, {
+    const response = await fetch(`${base}/api/gravePlotBusiness-cancelSale`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ idRoom: 1000001 }),
@@ -265,42 +262,43 @@ test('sale/delete: 软删销售 + 墓位回置未销售(清空buyer) + 软删联
 
     const calls = mockPool.calls;
     const sqls = calls.map((call) => call.sql);
-    // 1. 先查活动销售记录的付款人
-    assert.ok(sqls[0].includes('SELECT idSale, payer'));
-    // 2. 软删 sale:条件参数化
-    assert.ok(sqls.some((sql) => sql.includes('gm_data_001.sale set') && sql.includes('idRoom = ? AND isDeleted = 0')));
-    // 3. 墓位回置未销售 + 清空购墓人(值在 params 中;按 unsold 参数定位,避开归零链路先发的 room 起止清空语句)
-    const roomUpdate = calls.find(
-      (call) => call.sql.includes('gm_data_001.room set') && call.params.includes('statusType.saleStatusEnum.unsold'),
-    );
-    assert.ok(roomUpdate);
+    // 1. 六张业务表按 idRoom 软删活动记录:少删一张就会留下“销售已作废但下葬/收款仍在”的脏数据,
+    ['sale', 'buried', 'contacts', 'adminfee', 'burial_cert', 'period_change'].forEach((table) => {
+      assert.ok(
+        sqls.some((sql) => sql.includes(`gm_data_001.${table} set`) && sql.includes('idRoom = ? AND isDeleted = 0')),
+        `取消销售未软删 ${table} 表的活动记录`,
+      );
+    });
+    // 2. 墓位回置未销售/未完成,并清空编号/购墓人/安葬者/联系人/备注与管理费起止日期,
+    const roomUpdate = calls.find((call) => call.sql.includes('gm_data_001.room set'));
+    assert.ok(roomUpdate, '取消销售未回置墓位');
     assert.ok(roomUpdate.params.includes('statusType.saleStatusEnum.unsold'));
-    assert.ok(roomUpdate.params.includes(''));
-    // 4. 软删联系人:按 idRoom + 付款人匹配
-    const contactsDelete = calls.find((call) => call.sql.includes('gm_data_001.contacts set'));
-    assert.ok(contactsDelete);
-    assert.ok(contactsDelete.params.includes('张三'));
-    // 5. contacts 聚合同步 room.contacts
-    assert.ok(sqls.some((sql) => sql.includes('GROUP_CONCAT(c.contacts')));
+    assert.ok(roomUpdate.params.includes('statusType.intoStatusEnum.incomplet'));
+    ['serialNo', 'buyer', 'deceased', 'contacts', 'remark', 'startDate', 'endDate'].forEach((column) => {
+      assert.ok(roomUpdate.sql.includes(`${column} = ?`), `墓位回置未清空 ${column} 列`);
+    });
   } finally {
     server.close();
   }
 });
 
-test('buried/save insert: 下葬 + 锚定日期 + 墓位置已下葬 + deceased聚合 + 联系人新增 + contacts聚合,同一事务', async () => {
-  // 联系人匹配查询返回空 → 走"名/电话均不存在则新增"分支
+test('gravePlotBusiness/save insert(buried): 下葬 + 锚定日期 + 墓位置已下葬 + deceased聚合 + 联系人新增 + contacts聚合,同一事务', async () => {
+  // 原 /api/buried-save(墓区下葬登记页)已于三轮下线,单条下葬记录的写唯一入口是墓位业务的下葬形态;
+  // 联系人匹配查询返回空 → 走"名/电话均不存在则新增"分支,
   const mockPool = createMockPool([]);
   database.setPoolForTesting(mockPool);
 
-  const buriedSave = require('../buried/save');
-  const { server, base } = startServer(buriedSave, '/api/buried-save');
+  const gravePlotBusinessSave = require('../gravePlotBusiness/save');
+  const { server, base } = startServer(gravePlotBusinessSave, '/api/gravePlotBusiness-save');
   try {
-    const response = await fetch(`${base}/api/buried-save/insert`, {
+    const response = await fetch(`${base}/api/gravePlotBusiness-save/insert`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        type: 'buried',
         idRoom: '1000001',
         burialDate: '2026-09-17',
+        deathDate: '2026-09-15',
         deceased: '李四',
         contacts: '张三',
         contactsphone: '13800138000',
@@ -313,9 +311,9 @@ test('buried/save insert: 下葬 + 锚定日期 + 墓位置已下葬 + deceased�
 
     const calls = mockPool.calls;
     const sqls = calls.map((call) => call.sql);
-    // 1. 锚定日先查最早下葬日(20261018 ⑤ 改版后首位不再是联系人匹配,改为断言其存在),联系人匹配随后在列
+    // 1. 锚定日先查最早下葬日(与本次下葬日取小),联系人匹配读在事务内随后在列
     assert.ok(sqls.some((sql) => sql.includes('select min(burialDate)')));
-    assert.ok(sqls.some((sql) => sql.includes('from gm_data_001.contacts where idRoom = ?')));
+    assert.ok(sqls.some((sql) => sql.includes('gm_data_001.contacts') && sql.includes('idRoom = ?')));
     // 2. 插入下葬记录
     assert.ok(sqls.some((sql) => sql.includes('insert into gm_data_001.buried')));
     // 3. 管理费起止锚定链:重排需先读活动收款行,再写 room 起止(20261018 ⑤ 改版后不再直写 coalesce(endDate)
@@ -1550,8 +1548,9 @@ function startRegistryApp(entryPath, options = {}) {
   return { server, base: `http://127.0.0.1:${server.address().port}`, calls };
 }
 
-test('P1-3 详情聚合: 仅具下葬菜单的操作员可按墓位取迁出记录,同前缀列表路径仍严格校验', async () => {
-  const { server, base, calls } = startRegistryApp('/api/transferOut-query', { authorizedMenus: ['buried'] });
+// 详情页菜单全集里已不再包含下线的 sale/buried/contacts,本组用例改用存活的查询页菜单作为“仅具单一详情页菜单”身份,
+test('P1-3 详情聚合: 仅具下葬查询菜单的操作员可按墓位取迁出记录,同前缀列表路径仍严格校验', async () => {
+  const { server, base, calls } = startRegistryApp('/api/transferOut-query', { authorizedMenus: ['buriedQuery'] });
   try {
     const detail = await fetch(`${base}/api/transferOut-query/?idRoom=1`);
     assert.strictEqual(detail.status, 200, '详情第 7 路(迁出)应被“任一详情页菜单”放行');
@@ -1582,12 +1581,13 @@ test('P1-3 详情聚合: 仅具下葬菜单的操作员可按墓位取迁出记�
 test('P1-3 详情聚合: 白名单外的路径形状回到严格口径,白名单内的真实路径照常放行', async () => {
   // 旧判定按“路径等于 /idList”猜测,凡是挂了 queryDetail 的前缀碰到该形状都走宽松口径,
   // 而 /idList 只在 room-query 上存在(本前缀根本没这条路由),现按登记项逐条精确匹配,
-  const { server, base, calls } = startRegistryApp('/api/sale-query', { authorizedMenus: ['buried'] });
+  const { server, base, calls } = startRegistryApp('/api/sale-query', { authorizedMenus: ['buriedQuery'] });
   try {
     const spoof = await fetch(`${base}/api/sale-query/idList?idRoom=1`);
     assert.strictEqual(spoof.status, 403, '未登记的形状不应被当成详情路径');
     const power = calls.find((call) => String(call.sql).includes('operator_power'));
-    assert.deepStrictEqual(power.params.slice(1), ['sale'], '应只按本前缀登记的单菜单严格判定');
+    // 销售登记页已下线,本前缀的非详情路径改按存活的「墓区销售查询」菜单严格判定,
+    assert.deepStrictEqual(power.params.slice(1), ['saleQuery'], '应只按本前缀登记的单菜单严格判定');
 
     // 白名单内的真实详情路径必须仍然放行,否则收窄就把自家详情页一并关掉了,
     const okDetail = await fetch(`${base}/api/sale-query/get-by-room?idRoom=1`);
@@ -1598,8 +1598,8 @@ test('P1-3 详情聚合: 白名单外的路径形状回到严格口径,白名单
 });
 
 test('P1-3 详情聚合: 缺 idRoom、非数值 idRoom 与非 GET 请求都不升级宽松口径', async () => {
-  // 只授权销售菜单:下葬前缀的严格口径(menu=buried)必然 403,据此反证本次请求是否走了详情宽松口径,
-  const { server, base, calls } = startRegistryApp('/api/buried-query', { authorizedMenus: ['sale'] });
+  // 只授权管理费查询菜单(在详情页全集内但不是下葬前缀的本菜单):下葬前缀的严格口径必然 403,据此反证本次请求是否走了详情宽松口径,
+  const { server, base, calls } = startRegistryApp('/api/buried-query', { authorizedMenus: ['adminfeeQuery'] });
   try {
     assert.strictEqual((await fetch(`${base}/api/buried-query/`)).status, 403, '不带 idRoom 就不是详情取数,不该借详情口径');
     assert.strictEqual((await fetch(`${base}/api/buried-query/?idRoom=abc`)).status, 403, 'idRoom 非数值时不该放大权限口径');
@@ -1611,7 +1611,7 @@ test('P1-3 详情聚合: 缺 idRoom、非数值 idRoom 与非 GET 请求都不�
 
     const powerCalls = calls.filter((call) => String(call.sql).includes('operator_power')).map((call) => call.params.slice(1));
     assert.strictEqual(powerCalls.length, 2, '严格口径命中缓存只打一次,详情口径另打一次');
-    assert.ok(powerCalls.some((names) => names.length === 1 && names[0] === 'buried'), '拦截请求应按单菜单 buried 判定');
+    assert.ok(powerCalls.some((names) => names.length === 1 && names[0] === 'buriedQuery'), '拦截请求应按单菜单 buriedQuery 判定');
     assert.ok(powerCalls.some((names) => names.length > 10), '放行请求应按详情页菜单全集判定');
   } finally {
     server.close();
@@ -1621,7 +1621,7 @@ test('P1-3 详情聚合: 缺 idRoom、非数值 idRoom 与非 GET 请求都不�
 test('P1-3 详情聚合: 宽松口径只放宽菜单层,限定区域操作员读它区墓位迁出记录仍被归属守卫拦下', async () => {
   // 本前缀的裸 / 此前既没登记详情放行也没有区域归属校验:限定区域的操作员可借详情接口读它区迁出记录,
   const denied = startRegistryApp('/api/transferOut-query', {
-    authorizedMenus: ['buried'],
+    authorizedMenus: ['buriedQuery'],
     operatorRegions: ['福西'],
     businessRows: [{ region: '福东', idTransfer: 9 }],
   });
@@ -1637,7 +1637,7 @@ test('P1-3 详情聚合: 宽松口径只放宽菜单层,限定区域操作员读
   }
 
   const allowed = startRegistryApp('/api/transferOut-query', {
-    authorizedMenus: ['buried'],
+    authorizedMenus: ['buriedQuery'],
     operatorRegions: ['福东'],
     businessRows: [{ region: '福东', idTransfer: 9 }],
   });

@@ -51,6 +51,23 @@ function buildMenuTreeFromRows(rows) {
     return roots.map((root) => root.menuItem);
 }
 
+// 「用户管理」子树只对平台账户可见(审查修复 20261021 三轮 P1-1):
+// 101100 用户管理 及其下的 101101 账户信息 / 101102 合同列表,背后的接口读写 gm_data_000 全局表
+// 且语句本身不带租户条件(即注册表里标了 globalScope 的那批条目),租户就算被勾上菜单也只能拿到 403。
+// 接口侧已由 routeRegistry 整前缀 platformOnly 硬约束收口,本函数是菜单侧的同步兜底:
+// 两者共用同一个业务口径而不是依赖“运营不勾错权限”,并避开配置手滑时给租户留一个点开即报错的死菜单,
+const PLATFORM_ONLY_MENU_ROOTS = ['101100'];
+
+function filterPlatformOnlyMenus(menuTree, isPlatformAccount) {
+    if (isPlatformAccount) {
+        return menuTree;
+    }
+    return menuTree.filter((node) => !PLATFORM_ONLY_MENU_ROOTS.includes(String(node.id)));
+}
+
+// 挂到 router 上导出供用例复用同一份 id 清单(本文件只导出 router,不另开导出面),
+router.filterPlatformOnlyMenus = filterPlatformOnlyMenus;
+
 // 按name递归查找菜单节点 20260831 新增,
 function findMenuNodeByName(tree, name) {
     for (const node of tree) {
@@ -142,8 +159,11 @@ router.get('/', async (req, res) => {
         const conditionParams = [req.data.dataBase, req.data.userId];
         const menuRows = await pool.query(`SELECT * FROM gm_data_000.menu WHERE id in (${conditionSql}) ORDER BY id`, conditionParams);
         const menuTree = buildMenuTreeFromRows(menuRows);
-        // 墓位业务：10 个页面菜单按区域重组为"区域二级 + 页面三级"结构 20260923 修改,
+        // 非平台账户不下发「用户管理」子树(三轮 P1-1 的菜单侧兜底,口径与接口侧 platformOnly 取同一个 rbac 判据),
+        const visibleMenuTree = filterPlatformOnlyMenus(menuTree, rbac.isPlatformAdmin(req));
+        // 墓位业务：7 个页面菜单按区域重组为"区域二级 + 页面三级"结构 20260923 修改,
         // 管理费用收款/管理期限维护 20260925 自收费管理迁入墓位管理(菜单 id 103108/103109),一并挂到各区域下,
+        // 销售/下葬/联系人三个登记页菜单(103102/103103/103105)已于三轮下线,不再参与区域重组,
         // 区域二级菜单按当前操作员 operator.region 收窄,未配置区域(及平台管理员)时不做过滤;
         // 区域取数已上收到 rbac,与区域下拉同源 20261010 修改,
         // 本接口单独保留降级:取数失败时按“不过滤”渲染菜单树。菜单层级只是导航展示,
@@ -155,8 +175,8 @@ router.get('/', async (req, res) => {
         } catch (regionError) {
             console.warn('fetchOperatorRegions failed(菜单降级为不过滤):', req.data.userId, regionError.message);
         }
-        await rebuildRegionMenus(menuTree, req.data.dataBase, 'operate', ['gravePlotBusiness', 'sale', 'buried', 'reserve', 'contacts', 'transferOut', 'room', 'adminfee', 'managementPeriod'], operatorRegions);
-        return public.respondList(res, menuTree);
+        await rebuildRegionMenus(visibleMenuTree, req.data.dataBase, 'operate', ['gravePlotBusiness', 'reserve', 'transferOut', 'room', 'adminfee', 'managementPeriod'], operatorRegions);
+        return public.respondList(res, visibleMenuTree);
     } catch (error) {
         return public.handleQueryError(res, error);
     }

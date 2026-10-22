@@ -18,6 +18,7 @@ const rbac = require('./rbac');
 // 现在新增接口只需在 routeRegistry.js 加一条条目,守卫与路由由 mountApiRoutes 按固定顺序统一挂载,
 const routeRegistry = require('./routeRegistry');
 const httpDefaults = require('./httpDefaults');
+const pkg = require('./package.json');
 
 const app = express();
 
@@ -56,6 +57,14 @@ app.use(httpDefaults.gzipJson);
 app.get('/', (req, res) => {
   res.send('Hello, World!')
 });
+
+// 健康探针(审查修复 20261021 三轮 P2-6):必须挂在鉴权/响应信封中间件之前——免鉴权、响应不套 {code} 业务信封,
+// 供 nginx/监控直接看 HTTP 200 探活;池占用取自 database.poolStats,超时取启动时 applyServerTimeouts 的回读值,
+app.get('/health', httpDefaults.createHealthHandler({
+  version: `${pkg.name}@${pkg.version}`,
+  getPoolStats: () => database.poolStats(),
+  getServerTimeouts: () => appliedTimeouts,
+}));
 
 // 请求体上限(审查修复 20261021 P2):原写法未设 limit,单个请求可塞任意大 JSON 在解析阶段就打满内存,
 // 超限由 body-parser 抛 entity.too.large 并由下方终态错误中间件统一回 413 JSON 信封,
@@ -173,9 +182,11 @@ if (config.securityFatal.length > 0) {
 // 启动前幂等建表:确保登录态表 login_session 存在,线上老库缺表曾导致登录 500 20260917 修复,
 // tenant.ensureLoaded:首次拉取已登记租户库名单(拉不到不致命,闸门会降级为仅形态白名单),
 let server = null;
+// applyServerTimeouts 的回读值(启动后才能拿到,初始为 null):/health 会把它透出供运维核对生效值,
+let appliedTimeouts = null;
 Promise.all([loginState.ensureTable(), device.ensureTable(), tenant.ensureLoaded()]).then(() => {
   server = app.listen(config.app.port, () => {
-    httpDefaults.applyServerTimeouts(server);
+    appliedTimeouts = httpDefaults.applyServerTimeouts(server);
     console.log(`Server is running on port ${config.app.port}`);
     // 租户库名单周期刷新(5 分钟),新建租户无需重启, 20261021 审查修复二轮 P0-1,
     tenant.startAutoRefresh();

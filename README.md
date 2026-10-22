@@ -50,6 +50,20 @@ npm run db:init:mysql
 
 后续如引入新的模板库结构变更，再按需新增幂等迁移脚本。
 
+### 20261021 三轮：下线销售/下葬/联系人登记页（存量库需执行一次）
+
+墓区销售（103102）、墓区下葬（103103）、墓位联系（103105）三个登记页已由「墓位业务」（103101）的购墓人/下葬者/联系人形态取代，代码侧同步删除了 `/api/{sale,buried,contacts}-save`、`/api/{sale,buried,contacts}-delete` 六个接口与对应前端页面（三个 `-query` 前缀保留，墓位业务详情聚合与查询统计页仍依赖它们）。
+
+`menu` / `account_power` / `operator_power` 都是模板库 `gm_data_000` 里的全局表，**存量库执行一次即覆盖全部租户**：
+
+```sql
+DELETE FROM gm_data_000.menu           WHERE id      IN ('103102', '103103', '103105');
+DELETE FROM gm_data_000.account_power  WHERE idMenu  IN ('103102', '103103', '103105');
+DELETE FROM gm_data_000.operator_power WHERE idMenu  IN ('103102', '103103', '103105');
+```
+
+发布顺序必须**先执行上面的 SQL，再（或同时）发前端**：前端路由唯一来源是菜单接口，若菜单行还在而页面组件已删，`utils/route` 的动态导入只能回落成“菜单能点、页面空白”的静默失败。业务数据表 `sale` / `buried` / `contacts` 不受影响，历史数据继续由墓位业务页与 105101/105102/105104 三个查询页读写。
+
 建库行为说明：业务库由 `account-save/createDataBase` 从模板库动态对齐创建（`information_schema` 读取表/视图，业务表 `CREATE TABLE ... LIKE`，全局表不复制）；同名库已存在时返回 409 拒绝重建，不再执行 `DROP DATABASE`。
 
 ## 启动项目
@@ -86,6 +100,74 @@ pm2 status                # 进程状态
 ```
 
 说明：登录态已持久化到 `gm_data_000.login_session`，重启/多实例不丢登录态；但连接池上限 20 且无共享内存状态，多实例部署前需评估数据库连接数与负载。
+
+## 日志与排障（20261022 三轮 P2-7 成文）
+
+后端一律写 stdout/stderr，**不自建文件与轮转**：日志落盘、按天切割、过期清理交给 pm2（`pm2-logrotate`）或容器日志驱动。因此**进程重启即丢控制台历史**，长期留存只能靠 pm2-logrotate 或容器日志驱动（二选一），不要指望 `node index.js` 直跑的输出可回溯。
+
+四类日志行**行首都带同一个请求关联号** `[reqId]`，这是把它们串起来的唯一线索：
+
+| 行形态 | 触发条件 | 出处 |
+|------|------|------|
+| `[ISO时间] [reqId] GET /api/room-query/region 200 13ms` | 每个请求的访问日志 | [httpDefaults.js](httpDefaults.js) `requestLog` |
+| `[ISO时间][warn] [reqId] POST ... 403 9ms` | 响应状态码 ≥ 400 自动升为 warn 行 | 同上 |
+| `[ISO时间][warn][slow-request] [reqId] ...` | 整条链路耗时 ≥ `SLOW_REQUEST_MS`（默认 3000） | 同上 |
+| `[slow-query][reqId] <tag> 823ms SELECT ...` | 单条语句 ≥ `SLOW_QUERY_MS`（默认 500），语句截断 200 字符 | [database.js](database.js) `markSlowQuery` |
+| `[unhandledRejection][reqId] <堆栈>` | async handler 抛出的 rejection（Express 4 不捕获），并尽力补发 500 | [index.js](index.js) |
+
+关联号规则：入站带合法 `X-Request-Id` 时**沿用**（把 nginx 与后端日志接成同一条时间线），否则生成 base36 短号；无论哪种都回写响应头 `X-Request-Id`，所以**前端报障时只要引用该号**就能在后端定位到这一次操作的全部日志行（含被挡的 403 原因行）。
+
+常用命令（服务器）：
+
+```bash
+pm2 logs cemetery-api --lines 200          # 实时跟日志(out + error 两个流都会出)
+grep -F "[mj3k1a9]" ~/.pm2/logs/cemetery-api-out.log ~/.pm2/logs/cemetery-api-error.log   # 按关联号取整条链路
+grep "\[warn\]" ~/.pm2/logs/cemetery-api-error.log | tail -50   # 只看 4xx/5xx 与慢请求行
+grep "\[slow-query\]" ~/.pm2/logs/cemetery-api-out.log | tail -30  # 缺索引的语句候选清单
+```
+
+排查顺序建议：先按 reqId 取到这一次操作的访问行与状态码 → 若是 5xx/慢请求再看同一次的 `[slow-query]` 行定位语句 → 只有堆栈没有 reqId 的行说明发生在请求上下文之外（启动期/定时器），按时间戳对齐。
+
+隐私与调参口径：访问日志的 URL 走 `maskRequestTarget` 脱敏——参数名命中 `phone|mobile|password|pwd|idcard|name|account|contact|user` 或值形似手机号时只留前 3 后 4；慢语句日志**只记 SQL 不记参数值**；`region` 等业务标识原样保留以便定位。可调环境变量：`SLOW_REQUEST_MS`(3000)、`SLOW_QUERY_MS`(500)、`DB_POOL_LIMIT`(20)、`DB_POOL_QUEUE_LIMIT`(200)、`COUNT_CACHE_MS`(10000)。日志级别不做开关：warn 行靠 `[warn]` 标记区分，不引入日志框架。
+
+## 部署护栏：健康探针与索引补齐（20261022 三轮 P2-6 / P1-5）
+
+### 健康探针 `GET /health`
+
+免鉴权、不读业务数据、**不做任何数据库查询**（纯进程存活探测，避免高频探活反过来拖垮 DB），因此挂在鉴权与响应信封中间件**之前**，响应也**不套** `{code}` 业务信封——运维按 HTTP `200` 判活即可。返回体：
+
+```jsonc
+{
+  "status": "ok",
+  "uptimeSeconds": 3821,          // 进程存活秒数
+  "version": "cemetery-api@1.0.0",
+  "node": "v22.x",
+  "timestamp": "2026-10-22T...Z",
+  "pool": { "total": 8, "idle": 6, "borrowed": 2, "waiting": 0 },  // 连接池占用/排队(mysql2 内部计数)
+  "timeouts": { "requestTimeout": 45000, "headersTimeout": 12000, "keepAliveTimeout": 4000 }  // 启动时 applyServerTimeouts 回读的生效值
+}
+```
+
+```bash
+curl -s http://127.0.0.1:3000/health        # 期望 200 + 上面结构(不带 Authorization)
+```
+
+nginx / PM2 / 外部监控可直接对该路径做 `200` 探活；`pool.waiting` 持续大于 0 说明连接池被占满（配合 `[slow-query]` 行定位缺索引语句）。
+
+### 索引补齐（务必逐库执行）
+
+[gm_data_000.sql](gm_data_000.sql) 的 `KEY` 定义**只对新库生效**；新租户表由 [account/save.js](account/save.js) 的 `CREATE TABLE ... LIKE gm_data_000.<t>` 复制——**模板库补齐之后新开的租户才带索引，脚本落地前已上线的存量租户库不会被自动 touch**。因此每次升级结构后，在服务器对**全部租户库**跑一次幂等补齐：
+
+```bash
+npm run db:indexes:all      # = node scripts/add-indexes.js --all-tenants，逐个 gm_data_% 库补同一批二级索引 + 两处唯一约束
+npm run db:indexes          # 仅补 .env 指定的单库(通常是模板库)
+```
+
+要点：
+
+- 每项先查 `information_schema` 再决定是否 `ALTER`，**重复运行安全**；全局表（`operator/menu/account…`）在租户库不存在时会自动跳过，不会报错中断。
+- `uk_room_region_serial`（区内编号唯一）、`uk_room_coord`（活动墓位坐标唯一）两处**唯一约束**遇到存量重复编号/重复坐标时**刻意不静默改数据**：改为把全量清单写到 `scripts/add-indexes-duplicates.txt`（已在 .gitignore，含 db/region/编号/坐标/冲突 idRoom），运维据清单人工改号或软删多余行后**重跑本脚本**才会建上唯一索引。
+- 首次上线该修复前，建议先在测试库跑一次 `--all-tenants`，把是否已存在重复编号/重复坐标的告警清单确认干净（或据此安排人工并号），再在生产执行。
 
 ## 接口烟测
 

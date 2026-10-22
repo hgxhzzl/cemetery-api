@@ -19,6 +19,12 @@ router.get('/summary', async (req, res) => {
 
     const query = pool.query;
 
+    // 首页这 12 条聚合/明细此前每次都全量重跑,而分页列表早已复用 countCache——看板是唯一漏掉的一处。
+    // 统一走 public.queryCachedRows 短 TTL 复用(与分页总数同一套键/写语句作废/TTL 机制):任一写语句落库即整体作废,
+    // 不会出现“刚登记完销售首页还显示旧数”;缓存键含库名与全部参数(含各操作员区域名单),多租户与跨区互不串数据
+    // (审查修复 20261021 三轮 P2-12),
+    const cachedQuery = (sql, params = []) => public.queryCachedRows(query, { database: db, sql, params });
+
     // 首页聚合按当前操作员所属区域收窄(硬隔离):菜单层/下拉层/列表接口均已过滤,首页卡片与明细若不过滤
     // 会把别区的销售额/下葬安葬者/联系人电话一并展示出来 20261010 新增,
     // 已 JOIN room 的语句直接追加 r.region IN(...);未 JOIN room 的总额语句走 idRoom 子查询,
@@ -34,22 +40,22 @@ router.get('/summary', async (req, res) => {
         // 11 个查询分两批并发：错峰降低建连并发峰值，避免连接池冷启动偶发 500 20260917 修改 20260926 调整
         // 区域标签去掉 LIMIT 2 改为取回后按名单过滤再取前二:先截断再过滤会出现“前二恰好是别区”导致首页卡片直接空掉 20261010 硬隔离,
         const [regionRows, yearSalesRows, yearFeesRows, yearBuriedRows, reservedBuriedRows, monthlyRows] = await Promise.all([
-            query(`SELECT tagName as label, tagName as value FROM ${db}.taginfo WHERE tagType ='region' ORDER BY id ASC`, []),
-            query(`SELECT COALESCE(SUM(realPrice), 0) AS v FROM ${db}.sale WHERE isDeleted = 0 AND createDate >= ? AND createDate < ?${roomRegionSql('idRoom')}`, [yearStart, nextYearStart, ...allowedRegions]),
-            query(`SELECT COALESCE(SUM(payAmount), 0) AS v FROM ${db}.adminfee WHERE isDeleted = 0 AND createDate >= ? AND createDate < ?${roomRegionSql('idRoom')}`, [yearStart, nextYearStart, ...allowedRegions]),
-            query(`SELECT COUNT(*) AS v FROM ${db}.buried WHERE isDeleted = 0 AND burialDate >= ? AND burialDate <= NOW()${roomRegionSql('idRoom')}`, [yearStart, ...allowedRegions]),
-            query(`SELECT COUNT(*) AS v FROM ${db}.buried WHERE isDeleted = 0 AND burialDate > NOW() AND burialDate < ?${roomRegionSql('idRoom')}`, [nextYearStart, ...allowedRegions]),
-            query(`SELECT r.region, DATE_FORMAT(a.createDate, '%m') AS month, COUNT(*) AS count FROM ${db}.sale a JOIN ${db}.room r ON a.idRoom = r.idRoom WHERE a.isDeleted = 0 AND a.createDate >= ? AND a.createDate < ?${joinRegionSql} GROUP BY r.region, DATE_FORMAT(a.createDate, '%m') ORDER BY r.region, month`, [yearStart, nextYearStart, ...allowedRegions]),
+            cachedQuery(`SELECT tagName as label, tagName as value FROM ${db}.taginfo WHERE tagType ='region' ORDER BY id ASC`, []),
+            cachedQuery(`SELECT COALESCE(SUM(realPrice), 0) AS v FROM ${db}.sale WHERE isDeleted = 0 AND createDate >= ? AND createDate < ?${roomRegionSql('idRoom')}`, [yearStart, nextYearStart, ...allowedRegions]),
+            cachedQuery(`SELECT COALESCE(SUM(payAmount), 0) AS v FROM ${db}.adminfee WHERE isDeleted = 0 AND createDate >= ? AND createDate < ?${roomRegionSql('idRoom')}`, [yearStart, nextYearStart, ...allowedRegions]),
+            cachedQuery(`SELECT COUNT(*) AS v FROM ${db}.buried WHERE isDeleted = 0 AND burialDate >= ? AND burialDate <= NOW()${roomRegionSql('idRoom')}`, [yearStart, ...allowedRegions]),
+            cachedQuery(`SELECT COUNT(*) AS v FROM ${db}.buried WHERE isDeleted = 0 AND burialDate > NOW() AND burialDate < ?${roomRegionSql('idRoom')}`, [nextYearStart, ...allowedRegions]),
+            cachedQuery(`SELECT r.region, DATE_FORMAT(a.createDate, '%m') AS month, COUNT(*) AS count FROM ${db}.sale a JOIN ${db}.room r ON a.idRoom = r.idRoom WHERE a.isDeleted = 0 AND a.createDate >= ? AND a.createDate < ?${joinRegionSql} GROUP BY r.region, DATE_FORMAT(a.createDate, '%m') ORDER BY r.region, month`, [yearStart, nextYearStart, ...allowedRegions]),
         ]);
         // 第二批：周明细与按区域分解与下葬明细，与第一批错峰并发 20260917 修改 20260925 新增
         const [weeklyRows, yearSalesRegionRows, yearFeesRegionRows, yearBuriedRegionRows, reservedBuriedRegionRows, buriedRows] = await Promise.all([
-            query(`SELECT a.idSale, r.region, r.park, r.xyNumber, a.realPrice, a.payer, DATE_FORMAT(a.createDate, '%Y-%m-%d') AS createDate FROM ${db}.sale a JOIN ${db}.room r ON a.idRoom = r.idRoom WHERE a.isDeleted = 0 AND a.createDate >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND a.createDate < DATE_ADD(CURDATE(), INTERVAL 1 DAY)${joinRegionSql} ORDER BY a.createDate DESC, a.idSale DESC`, [...allowedRegions]),
-            query(`SELECT r.region, COALESCE(SUM(a.realPrice), 0) AS v FROM ${db}.sale a JOIN ${db}.room r ON a.idRoom = r.idRoom WHERE a.isDeleted = 0 AND a.createDate >= ? AND a.createDate < ?${joinRegionSql} GROUP BY r.region ORDER BY r.region`, [yearStart, nextYearStart, ...allowedRegions]),
-            query(`SELECT r.region, COALESCE(SUM(a.payAmount), 0) AS v FROM ${db}.adminfee a JOIN ${db}.room r ON a.idRoom = r.idRoom WHERE a.isDeleted = 0 AND a.createDate >= ? AND a.createDate < ?${joinRegionSql} GROUP BY r.region ORDER BY r.region`, [yearStart, nextYearStart, ...allowedRegions]),
-            query(`SELECT r.region, COUNT(*) AS v FROM ${db}.buried b JOIN ${db}.room r ON b.idRoom = r.idRoom WHERE b.isDeleted = 0 AND b.burialDate >= ? AND b.burialDate <= NOW()${joinRegionSql} GROUP BY r.region ORDER BY r.region`, [yearStart, ...allowedRegions]),
-            query(`SELECT r.region, COUNT(*) AS v FROM ${db}.buried b JOIN ${db}.room r ON b.idRoom = r.idRoom WHERE b.isDeleted = 0 AND b.burialDate > NOW() AND b.burialDate < ?${joinRegionSql} GROUP BY r.region ORDER BY r.region`, [nextYearStart, ...allowedRegions]),
+            cachedQuery(`SELECT a.idSale, r.region, r.park, r.xyNumber, a.realPrice, a.payer, DATE_FORMAT(a.createDate, '%Y-%m-%d') AS createDate FROM ${db}.sale a JOIN ${db}.room r ON a.idRoom = r.idRoom WHERE a.isDeleted = 0 AND a.createDate >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND a.createDate < DATE_ADD(CURDATE(), INTERVAL 1 DAY)${joinRegionSql} ORDER BY a.createDate DESC, a.idSale DESC`, [...allowedRegions]),
+            cachedQuery(`SELECT r.region, COALESCE(SUM(a.realPrice), 0) AS v FROM ${db}.sale a JOIN ${db}.room r ON a.idRoom = r.idRoom WHERE a.isDeleted = 0 AND a.createDate >= ? AND a.createDate < ?${joinRegionSql} GROUP BY r.region ORDER BY r.region`, [yearStart, nextYearStart, ...allowedRegions]),
+            cachedQuery(`SELECT r.region, COALESCE(SUM(a.payAmount), 0) AS v FROM ${db}.adminfee a JOIN ${db}.room r ON a.idRoom = r.idRoom WHERE a.isDeleted = 0 AND a.createDate >= ? AND a.createDate < ?${joinRegionSql} GROUP BY r.region ORDER BY r.region`, [yearStart, nextYearStart, ...allowedRegions]),
+            cachedQuery(`SELECT r.region, COUNT(*) AS v FROM ${db}.buried b JOIN ${db}.room r ON b.idRoom = r.idRoom WHERE b.isDeleted = 0 AND b.burialDate >= ? AND b.burialDate <= NOW()${joinRegionSql} GROUP BY r.region ORDER BY r.region`, [yearStart, ...allowedRegions]),
+            cachedQuery(`SELECT r.region, COUNT(*) AS v FROM ${db}.buried b JOIN ${db}.room r ON b.idRoom = r.idRoom WHERE b.isDeleted = 0 AND b.burialDate > NOW() AND b.burialDate < ?${joinRegionSql} GROUP BY r.region ORDER BY r.region`, [nextYearStart, ...allowedRegions]),
             // 下葬明细：今天与明天（burialDate 落在 [CURDATE, CURDATE+2) 内），按日期升序 20260925 新增
-            query(`SELECT b.idBuried, r.region, r.park, r.xyNumber, b.deceased, b.contacts, b.contactsphone, DATE_FORMAT(b.burialDate, '%Y-%m-%d') AS burialDate FROM ${db}.buried b JOIN ${db}.room r ON b.idRoom = r.idRoom WHERE b.isDeleted = 0 AND b.burialDate >= CURDATE() AND b.burialDate < DATE_ADD(CURDATE(), INTERVAL 2 DAY)${joinRegionSql} ORDER BY b.burialDate ASC, b.idBuried ASC`, [...allowedRegions]),
+            cachedQuery(`SELECT b.idBuried, r.region, r.park, r.xyNumber, b.deceased, b.contacts, b.contactsphone, DATE_FORMAT(b.burialDate, '%Y-%m-%d') AS burialDate FROM ${db}.buried b JOIN ${db}.room r ON b.idRoom = r.idRoom WHERE b.isDeleted = 0 AND b.burialDate >= CURDATE() AND b.burialDate < DATE_ADD(CURDATE(), INTERVAL 2 DAY)${joinRegionSql} ORDER BY b.burialDate ASC, b.idBuried ASC`, [...allowedRegions]),
         ]);
         const visibleRegions = rbac.filterByOperatorRegions(regionRows, 'label', allowedRegions).slice(0, 2);
 

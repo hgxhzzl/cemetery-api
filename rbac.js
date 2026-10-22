@@ -161,8 +161,10 @@ function requirePowerByAnyMenuName(...menuNames) {
 // 而前端 Promise.all 一遇失败即静默放弃(详情视图不出现且无任何提示),表现为"点详情没反应"。
 // 口径统一为:调用"详情专用取数路径"时,只要具备任一含详情页功能菜单的 useMenu 即放行,
 // 各页卡片列表(/room /canSale /parkTree /room?park=region= 等)仍按自身菜单严格校验 20261004 修改,
+// 名单已剔除 sale/buried/contacts(菜单 103102/103103/103105 登记页于三轮下线,菜单行本身不再下发,
+// 留在名单里只会变成一个永不命中的死项;详情取数靠墓位业务/墓位设置/各查询页菜单即可命中),
 const DETAIL_PAGE_MENUS = [
-  'room', 'sale', 'buried', 'reserve', 'contacts', 'adminfee', 'transferOut',
+  'room', 'reserve', 'adminfee', 'transferOut',
   'gravePlotBusiness', 'managementPeriod',
   'roomQuery', 'saleQuery', 'buriedQuery', 'adminfeeQuery', 'contactsQuery', 'transferOutQuery',
 ];

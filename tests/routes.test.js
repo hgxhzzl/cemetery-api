@@ -200,6 +200,138 @@ test('routeRegistry: 路由内部守卫必须与条目 innerGuards 双向对账'
   assert.strictEqual(violations.length, 4, `应只报出 4 处问题,实际:${violations.join(' | ')}`);
 });
 
+// 「用户管理」子树与设备白名单的收口对账(审查修复 20261021 三轮 P1-1):
+// 这几个接口读写的都是 gm_data_000 里的全局表,语句本身不带租户条件,唯一的隔离就剩权限守卫一行,
+// 因此“仅平台管理员”不得只活在注释或菜单配置里:条目必须声明 globalScope + 整前缀 platformOnly,
+// 且真实请求必须以 403 结束并证明守卫排在 handler 之前(一条碰 contract 表的 SQL 都不该发出去),
+test('routeRegistry: 全局共享表条目必须整前缀收口为仅平台管理员', async () => {
+  const PLATFORM_ONLY_ENTRIES = [
+    '/api/device',
+    '/api/contract-save',
+    '/api/contract-query',
+    '/api/contract-delete',
+    '/api/account-save',
+    '/api/account-query',
+    '/api/account-delete',
+    '/api/accountPower-save',
+    '/api/accountPower-query',
+  ];
+  PLATFORM_ONLY_ENTRIES.forEach((path) => {
+    const entry = routeRegistry.ROUTES.find((item) => item.path === path);
+    assert.ok(entry, `注册表缺少条目 ${path}`);
+    assert.ok(typeof entry.globalScope === 'string' && entry.globalScope.startsWith('gm_data_000.'), `${path} 未声明 globalScope`);
+    assert.ok(
+      (entry.guards || []).some((guard) => !guard.at && guard.platformOnly),
+      `${path} 存在全局表但未按整前缀声明 platformOnly`,
+    );
+  });
+
+  // 行为面:以租户内普通操作员(isAccount=0,且本例连菜单权限池也返回空)请求合同三个前缀的全部接口,
+  // 全部应被平台守卫挡下;若守卫排在 handler 之后,pool 会收到“SELECT * FROM gm_data_000.contract”这种整库语句,
+  const noPowerPool = createNoPowerPool();
+  database.setPoolForTesting(noPowerPool);
+  const app = express();
+  app.use(bodyParser.json());
+  app.use((req, res, next) => {
+    req.data = { dataBase: 'gm_data_001', userName: 'tester', phone: '13800138000', userId: 2000, isAccount: 0 };
+    next();
+  });
+  routeRegistry.mountApiRoutes(app);
+
+  const server = app.listen(0);
+  try {
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const contractEndpoints = collectMountedEndpoints().filter((item) => item.entry.path.startsWith('/api/contract'));
+    assert.ok(contractEndpoints.length >= 5, `合同接口遍历数异常(${contractEndpoints.length}),用例已退化`);
+    for (const endpoint of contractEndpoints) {
+      const response = await fetch(`${base}${endpoint.fullPath}`, {
+        method: endpoint.methods.includes('GET') ? 'GET' : endpoint.methods[0],
+        headers: { 'Content-Type': 'application/json' },
+        body: endpoint.methods.includes('GET') ? undefined : JSON.stringify({}),
+      });
+      assert.strictEqual(response.status, 403, `全局表接口 ${endpoint.fullPath} 未收口为仅平台管理员`);
+    }
+    assert.deepStrictEqual(
+      noPowerPool.calls.filter((call) => String(call.sql).includes('gm_data_000.contract')),
+      [],
+      '守卫应在 handler 之前结束请求,不应发出任何读取全平台合同的语句',
+    );
+  } finally {
+    server.close();
+    database.resetPoolForTesting();
+  }
+});
+
+// 反向:新登记一个全局表条目却忘收权限 / 又给全局表挂了区域归属,两个方向都必须被体检报错,
+// 否则上面的正向断言只能证明“当下没问题”,挡不住以后新增的那一行,
+test('routeRegistry: 全局共享表条目漏收权限或误挂归属时报错', () => {
+  const emptyRouter = require('express').Router();
+  const noPlatform = {
+    path: '/api/fake-global',
+    router: emptyRouter,
+    note: '声明了全局表却没收平台锁',
+    globalScope: 'gm_data_000.contract',
+    guards: [{ at: '', menu: 'fake' }],
+  };
+  const withOwnership = {
+    path: '/api/fake-global-scope',
+    router: emptyRouter,
+    note: '全局表不应做区域归属',
+    globalScope: 'gm_data_000.contract',
+    guards: [{ at: '', platformOnly: true }, { at: '/insert', menu: 'fake', ownership: { table: 'room', idParam: 'idRoom' } }],
+  };
+
+  const violations = routeRegistry.auditRouteRegistry([noPlatform, withOwnership]);
+  assert.ok(
+    violations.some((line) => line.includes('/api/fake-global') && line.includes('却未按整前缀声明 platformOnly')),
+    '全局表条目漏收平台锁未被捕获',
+  );
+  assert.ok(
+    violations.some((line) => line.includes('/api/fake-global-scope/insert') && line.includes('不得声明 ownership')),
+    '全局表条目误挂区域归属未被捕获',
+  );
+  // 总数账:两个条目各贡献一处(第二条的平台锁已声明,只报 ownership 那项),多报即为误伤,
+  assert.strictEqual(violations.length, 2, `应只报出 2 处问题,实际:${violations.join(' | ')}`);
+});
+
+// 登记页下线的防回潮约束(审查修复 20261021 三轮 P1-3):销售/下葬/联系人三个登记页接口已从注册表摘除,
+// 写操作唯一入口是 gravePlotBusiness;若有人把它们加回来,等于重新打开一条无预定闸门/不派生下葬记录的旁路,
+// 因此这里钉住三层:条目不存在、任何守卫不再引用这三个已下线的菜单名、详情放行菜单全集里不含它们,
+test('routeRegistry: 已下线的登记页接口不得重新回到注册表', () => {
+  const OFFLINE_PREFIXES = [
+    '/api/sale-save',
+    '/api/sale-delete',
+    '/api/buried-save',
+    '/api/buried-delete',
+    '/api/contacts-save',
+    '/api/contacts-delete',
+  ];
+  const OFFLINE_MENUS = ['sale', 'buried', 'contacts'];
+
+  OFFLINE_PREFIXES.forEach((path) => {
+    assert.ok(!routeRegistry.ROUTES.some((entry) => entry.path === path), `${path} 已随登记页下线,不应再挂载`);
+  });
+
+  // 菜单行已从种子库删除,再引用只会得到恒 403 的死守卫,顺带把“臆想中的菜单名”拦在启动前,
+  const menuNames = new Set();
+  routeRegistry.ROUTES.forEach((entry) => {
+    (entry.guards || []).forEach((guard) => {
+      if (guard.menu) {
+        menuNames.add(guard.menu);
+      }
+      (guard.anyMenu || []).forEach((name) => menuNames.add(name));
+    });
+  });
+  OFFLINE_MENUS.forEach((name) => {
+    assert.ok(!menuNames.has(name), `守卫仍在引用已下线菜单 ${name}`);
+  });
+
+  const rbac = require('../rbac');
+  OFFLINE_MENUS.forEach((name) => {
+    assert.ok(!rbac.DETAIL_PAGE_MENUS.includes(name), `详情放行菜单全集仍含已下线菜单 ${name}`);
+  });
+});
+
 // 注册表必须真正接管挂载顺序:守卫先于业务路由由 mountApiRoutes 保证,
 // 这里验证同一条目内“子路径守卫”确实拦在同前缀业务路由之前(顺序错则等于无鉴权),
 test('routeRegistry: 同一条目内守卫挂载顺序先于业务路由', () => {
@@ -225,4 +357,177 @@ test('routeRegistry: 同一条目内守卫挂载顺序先于业务路由', () =>
     ['/api/fake-order/insert', '/api/fake-order'],
     '守卫挂载顺序应与声明顺序一致且先于业务路由',
   );
+});
+
+// 三轮 P1-2 共用口径:四个业务写入口与它们的目标墓位归属作用域(两个用例分别验单区/多区),
+const ownRoomScope = { table: 'room', idParam: 'idRoom' };
+const BUSINESS_INSERT = [
+  { path: '/api/gravePlotBusiness-save', menu: 'gravePlotBusiness' },
+  { path: '/api/transferOut-save', menu: 'transferOut' },
+  { path: '/api/adminfee-save', menu: 'adminfee' },
+  { path: '/api/reserve-save', menu: 'reserve' },
+];
+const findEntry = (path) => routeRegistry.ROUTES.find((item) => item.path === path);
+
+// 区域归属必须约束“新建”(审查修复 20261021 三轮 P1-2):/update、/delete 早已按主键查归属,
+// /insert 却空着——限定区域的操作员仍可直接指定它区 idRoom 新建业务记录。前端可选墓位本身已由区域名单收窄
+// (墓位列表按 region 等值 + 园区/区域下拉 filterByOperatorRegions + 显式 region 参数由 requireRegionScope 拦下),
+// 所以这道闸只为“绕过界面直调接口”兜底,正常操作零行为变化;两层都钉住:声明层与真实请求层,
+test('routeRegistry: 业务新建接口按目标墓位区域收窄(跨区新建 403,本区新建不误伤)', async () => {
+  // 1) 声明层:四个业务前缀的 /insert 都必须挂 ownRoomScope——新记录无主键可查,归属只能按目标墓位判定,
+  BUSINESS_INSERT.forEach(({ path, menu }) => {
+    const insertGuard = (findEntry(path).guards || []).find((guard) => guard.at === '/insert');
+    assert.ok(insertGuard, `${path} 缺少 /insert 守卫`);
+    assert.strictEqual(insertGuard.menu, menu, `${path}/insert 菜单口径不符`);
+    assert.deepStrictEqual(insertGuard.ownership, ownRoomScope, `${path}/insert 未按目标墓位声明区域归属`);
+  });
+
+  // 2) 请求层:只跑注册表声明的守卫,业务 handler 换成占位响应
+  // (否则要为四种形态各造一套事务 mock,且本用例要验的是守卫而不是业务分支),
+  // 墓位 region 由可变开关控制,据此构造“同区/跨区”两种目标墓位, 20261021 新增,
+  let roomRegion = '福东';
+  database.setPoolForTesting({
+    async query(sql) {
+      const text = String(sql);
+      if (text.includes('operator_power') || text.includes('gm_data_000.menu')) {
+        // 权限与菜单存在性检查恒命中:让 403 只能来自区域归属而不是缺菜单权限,
+        return [[{ 1: 1 }]];
+      }
+      return [[{ region: roomRegion }]];
+    },
+  });
+
+  const app = express();
+  app.use(bodyParser.json());
+  app.use((req, res, next) => {
+    // 福西区操作员(非平台管理员):名单注入口径与 index.js 的 requireRegionScope 结果一致,
+    req.data = { dataBase: 'gm_data_001', userName: 'tester', phone: '13800138000', userId: 2400, isAccount: 0 };
+    req.operatorRegions = ['福西'];
+    next();
+  });
+  BUSINESS_INSERT.forEach(({ path }) => {
+    const insertGuard = (findEntry(path).guards || []).find((guard) => guard.at === '/insert');
+    app.use(`${path}/insert`, ...routeRegistry.buildGuardMiddlewares(insertGuard), (req, res) => res.json({ ok: true }));
+  });
+
+  const server = app.listen(0);
+  try {
+    const base = `http://127.0.0.1:${server.address().port}`;
+    for (const { path } of BUSINESS_INSERT) {
+      roomRegion = '福东';
+      const denied = await fetch(`${base}${path}/insert`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idRoom: 1 }),
+      });
+      assert.strictEqual(denied.status, 403, `${path}/insert 它区墓位新建应被归属守卫拦下`);
+      const deniedBody = await denied.json();
+      assert.ok(deniedBody.error.includes('不属于当前区域'), `${path}/insert 拒绝原因应为区域归属:${deniedBody.error}`);
+
+      roomRegion = '福西';
+      const allowed = await fetch(`${base}${path}/insert`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idRoom: 1 }),
+      });
+      assert.strictEqual(allowed.status, 200, `${path}/insert 本区墓位新建不应被误伤`);
+    }
+  } finally {
+    server.close();
+    database.resetPoolForTesting();
+  }
+});
+
+// 一个操作员管多个区是现场现行做法(operator.region 形如“福东,福西”),所以上一条的单区 403 不得被误读成
+// “多区操作员也一并锁死”:名单由 rbac.fetchOperatorRegions 按半/全角逗号拆开,归属按 includes 逐项匹配。
+// 本用例跑真实链路(requireRegionScope 自己查库注名单,不人工塞 req.operatorRegions),
+// 防止日后拆分被改掉(整串当成一个区名)或 includes 改成等值比较时,多区操作员全线 403 却无测可发(三轮 P1-2),
+test('routeRegistry: 逗号多区域名单操作员对名单内各区均可新建,名单外区仍 403', async () => {
+  let roomRegion = '福东';
+  database.setPoolForTesting({
+    async query(sql) {
+      const text = String(sql);
+      if (text.includes('operator_power') || text.includes('gm_data_000.menu')) {
+        return [[{ 1: 1 }]];
+      }
+      if (text.includes('gm_data_000.operator')) {
+        // 区域名单真实数据形态:单列逗号串,同时验证全角分隔符也能被拆开,
+        return [[{ region: '福东，福西' }]];
+      }
+      return [[{ region: roomRegion }]];
+    },
+  });
+
+  const app = express();
+  app.use(bodyParser.json());
+  app.use((req, res, next) => {
+    req.data = { dataBase: 'gm_data_001', userName: 'tester', phone: '13800138000', userId: 2401, isAccount: 0 };
+    next();
+  });
+  // 与 index.js 同源:名单在 requireRegionScope 里注入,后续归属守卫直接读 req.operatorRegions,
+  app.use(rbac.requireRegionScope);
+  BUSINESS_INSERT.forEach(({ path }) => {
+    const insertGuard = (findEntry(path).guards || []).find((guard) => guard.at === '/insert');
+    app.use(`${path}/insert`, ...routeRegistry.buildGuardMiddlewares(insertGuard), (req, res) => res.json({ ok: true }));
+  });
+
+  const server = app.listen(0);
+  try {
+    const base = `http://127.0.0.1:${server.address().port}`;
+    for (const { path } of BUSINESS_INSERT) {
+      for (const inScopeRegion of ['福东', '福西']) {
+        roomRegion = inScopeRegion;
+        const response = await fetch(`${base}${path}/insert`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idRoom: 1 }),
+        });
+        assert.strictEqual(response.status, 200, `${path}/insert 名单内 ${inScopeRegion} 区不应被误伤`);
+      }
+
+      roomRegion = '福南';
+      const denied = await fetch(`${base}${path}/insert`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idRoom: 1 }),
+      });
+      assert.strictEqual(denied.status, 403, `${path}/insert 名单外区域应被归属守卫拦下`);
+    }
+  } finally {
+    server.close();
+    database.resetPoolForTesting();
+  }
+});
+
+// 成对规则的机器约束本身也得有牙齿(三轮 P1-2):只钉“当前注册表零违规”不足以证明以后漏写会报错,
+// 故反向构造三种条目形态:新建漏归属应报错、写了豁免理由应静默、豁免理由已无对应漏项应报漂移,
+test('routeRegistry: /insert 与 /update 的区域归属成对规则可双向报错', () => {
+  const emptyRouter = require('express').Router();
+  const looseGuards = [{ at: '/insert', menu: 'fake' }, { at: '/update', menu: 'fake', ownership: ownRoomScope }];
+  const loose = { path: '/api/fake-loose', router: emptyRouter, note: '新建漏归属', guards: looseGuards };
+  const exempted = { path: '/api/fake-exempt', router: emptyRouter, note: '已写豁免理由', insertOwnershipExempt: 'region 就在 body 里', guards: looseGuards };
+  const stale = {
+    path: '/api/fake-stale',
+    router: emptyRouter,
+    note: '豁免理由已失效',
+    insertOwnershipExempt: '两边都补上了',
+    guards: [
+      { at: '/insert', menu: 'fake', ownership: ownRoomScope },
+      { at: '/update', menu: 'fake', ownership: ownRoomScope },
+    ],
+  };
+
+  const violations = routeRegistry.auditRouteRegistry([loose, exempted, stale]);
+  assert.ok(violations.some((line) => line.includes('/api/fake-loose/insert') && line.includes('未声明 ownership')), '新建漏归属未被捕获');
+  assert.ok(!violations.some((line) => line.includes('/api/fake-exempt')), '已写明豁免理由的条目不应被误伤');
+  assert.ok(violations.some((line) => line.includes('/api/fake-stale') && line.includes('已无需要豁免')), '失效的豁免理由未被发现');
+  // 总数账:loose 一处 + stale 一处,多报即表明规则在误伤正常条目,
+  assert.strictEqual(violations.length, 2, `应只报出 2 处问题,实际:${violations.join(' | ')}`);
+
+  // 真实注册表里豁免必须只有一处(批量建位)且理由非空,防止有人把豁免字段当万能后门,
+  const exemptEntries = routeRegistry.ROUTES.filter((entry) => entry.insertOwnershipExempt);
+  assert.deepStrictEqual(exemptEntries.map((entry) => entry.path), ['/api/room-save'], '区域归属豁免条目应只有批量建位一条');
+  exemptEntries.forEach((entry) => {
+    assert.ok(String(entry.insertOwnershipExempt).length >= 20, `${entry.path} 的豁免理由过短,不足以判定为有意豁免`);
+  });
 });

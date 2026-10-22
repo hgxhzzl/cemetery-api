@@ -95,3 +95,35 @@ test('countCache: 条目数触顶时整体清空,不变成又一处无界内存'
   await countCache.queryAggregate(queryFn, { database: 'gm_data_001', sql: 'SELECT COUNT(*) AS total FROM room r WHERE id = ?', params: ['overflow'] });
   assert.strictEqual(countCache.statsForTesting().size, 1, '超上限时应先清空再写入当前条目');
 });
+
+// 首页 /summary 多行聚合短 TTL 复用(审查修复 20261021 三轮 P2-12):看板一次跑 12 条 SUM/COUNT/GROUP BY,
+// 对几十秒延迟不敏感,复用与分页总数同一套缓存;正确性仍靠“键含库名+参数”与“写语句即整体作废”两条,
+// 且行数组原样返回(不做数值归一),调用方保留自己的 Number(rows[0].v) 口径,
+test('queryCachedRows: TTL 内整片复用,库名/参数变化回源,写语句与 queryAggregate 共用作废', async () => {
+  countCache.resetForTesting();
+  let calls = 0;
+  const rows = async () => {
+    calls += 1;
+    return [{ region: '福东', v: '12.5' }, { region: '福西', v: '3' }];
+  };
+  const options = { database: 'gm_data_001', sql: 'SELECT r.region, SUM(a.realPrice) AS v FROM sale a JOIN room r ON a.idRoom=r.idRoom GROUP BY r.region', params: [] };
+
+  const first = await countCache.queryCachedRows(rows, options);
+  const second = await countCache.queryCachedRows(rows, options);
+  assert.strictEqual(calls, 1, '同库同语句同参数 TTL 内只回源一次');
+  assert.strictEqual(first, second, '命中时返回同一行数组引用');
+  assert.strictEqual(first[0].v, '12.5', '行数据原样返回,不在缓存层做数值归一');
+
+  // 参数(区域名单)变了即另一次查询,不得复用,否则跨区操作员会命中彼此的结果,
+  await countCache.queryCachedRows(rows, { ...options, params: ['福东'] });
+  assert.strictEqual(calls, 2, '参数变化应重新回源');
+  // 库名参与键:多租户按库隔离,
+  await countCache.queryCachedRows(rows, { ...options, database: 'gm_data_002', params: ['福东'] });
+  assert.strictEqual(calls, 3, '库名变化应重新回源');
+
+  // 与 queryAggregate 共用作废:任一写语句把整张表清掉(前面已积 3 个不同键的条目),看板行缓存不得残留旧值,
+  assert.strictEqual(countCache.invalidateForStatement('update gm_data_001.sale set isDeleted=1 where idSale=?'), 3, '写语句应清掉含行缓存在内的全部条目');
+  assert.strictEqual(countCache.statsForTesting().size, 0);
+  await countCache.queryCachedRows(rows, options);
+  assert.strictEqual(calls, 4, '作废后应回源重算');
+});
