@@ -145,7 +145,8 @@ async function rebuildRegionMenus(menuTree, dataBaseName, rootMenuName, pageName
         ];
     } catch (error) {
         // 区域查询失败时保留原有菜单结构，不影响登录进入 20260831 新增,
-        console.log('rebuildRegionMenus failed:', rootMenuName, error.message);
+        // 降级事件须走 warn 级(与 rbac/httpDefaults 的异常/降级路径同一口径),用 console.log 会被日志管道当普通输出漏报(四轮 P3 20261022),
+        console.warn('rebuildRegionMenus failed:', rootMenuName, error.message);
     }
 }
 
