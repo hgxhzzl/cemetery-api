@@ -3,6 +3,8 @@ const router = express.Router();
 const pool = require('./database');
 const public = require('./public');
 const rbac = require('./rbac');
+// 「用户管理」子树根清单与账户权限页列表过滤(accountPower/query.js)同源,集中到 lib/platformMenus 防止口径漂移(三轮 P1-1 延伸 20261022),
+const { PLATFORM_ONLY_MENU_ROOTS } = require('./lib/platformMenus');
 module.exports = router;
 
 // 一次查询取出全部有权限菜单行,内存中按 parent_id 建树,替代逐层递归查询(N+1) 20260915 优化,
@@ -56,8 +58,7 @@ function buildMenuTreeFromRows(rows) {
 // 且语句本身不带租户条件(即注册表里标了 globalScope 的那批条目),租户就算被勾上菜单也只能拿到 403。
 // 接口侧已由 routeRegistry 整前缀 platformOnly 硬约束收口,本函数是菜单侧的同步兜底:
 // 两者共用同一个业务口径而不是依赖“运营不勾错权限”,并避开配置手滑时给租户留一个点开即报错的死菜单,
-const PLATFORM_ONLY_MENU_ROOTS = ['101100'];
-
+// 根清单本体在 lib/platformMenus(与 accountPower/query.js 过滤共用),本函数只在建树后的下拉里按根 id 剔除整棵子树,
 function filterPlatformOnlyMenus(menuTree, isPlatformAccount) {
     if (isPlatformAccount) {
         return menuTree;
