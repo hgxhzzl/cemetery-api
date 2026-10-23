@@ -8,6 +8,7 @@
 
 const rbac = require('./rbac');
 const device = require('./device');
+const permissionTemplate = require('./lib/permissionTemplate');
 
 // 合同路径
 const contractDeleteROutes = require('./contract/delete');
@@ -72,9 +73,7 @@ const adminfeeDeleteROutes = require('./adminfee/delete');
 // 墓位联系人取数路径(墓位联系登记页 103105 已于三轮下线,仅保留详情聚合取数),
 const contactsQueryROutes = require('./contacts/query');
 // 预定路径
-const reserveSaveROutes = require('./reserve/save');
 const reserveQueryROutes = require('./reserve/query');
-const reserveDeleteROutes = require('./reserve/delete');
 // 账户权限路径
 const accountPowerQueryROutes = require('./accountPower/query');
 const accountPowerSaveROutes = require('./accountPower/save');
@@ -96,6 +95,9 @@ const ownAdminfeeScope = { table: 'adminfee', idField: 'idAdminfee', idParam: 'i
 //   menu         - 需具备该菜单的 useMenu(整前缀或 at 指定的子路径)
 //   openPaths    - 配合 menu:该前缀下的这些子路径仅需登录(参照数据不能要求页面菜单权限)
 //   anyMenu      - 任一指命菜单具备 useMenu 即放行(业务页与对应查询页共用同一接口)
+//   functionPower- 在菜单 useMenu 之上再按"功能×动作"白名单收口(gravePlotBusiness 的 sale/buried…);
+//                  自带菜单校验,不得再重复声明 menu/anyMenu;{ menu, fn?, action },fn 缺省运行期按
+//                  gm_data_000.menu.powerConfig 模板从 body/query 的 type 解析 20261023 新增/改造,
 //   queryDetail  - 配合 menu 或 anyMenu:查询前缀专用口径,详情取数路径按“任一详情页菜单”放行
 //                  (详情路径名单见 rbac.DETAIL_AGGREGATE_ROUTES,本表与之双向对账,详见 auditRouteRegistry) 20261021 二轮 P1-3,
 //   platformOnly - 仅平台管理员(gm_data_000 租户账户)
@@ -153,12 +155,12 @@ const ROUTES = [
   {
     path: '/api/contract-save',
     router: contractSaveROutes,
-    note: '合同新建/修改(仅平台管理员)',
+    note: '合同新建/修改(仅平台管理员,功能级权限)',
     globalScope: 'gm_data_000.contract',
     guards: [
       { at: '', platformOnly: true },
-      { at: '/insert', menu: 'contract' },
-      { at: '/update', menu: 'contract' },
+      { at: '/insert', functionPower: { menu: 'contract', action: 'create' } },
+      { at: '/update', functionPower: { menu: 'contract', action: 'modify' } },
     ],
   },
   {
@@ -171,9 +173,9 @@ const ROUTES = [
   {
     path: '/api/contract-delete',
     router: contractDeleteROutes,
-    note: '合同删除(仅平台管理员)',
+    note: '合同删除(仅平台管理员,功能级权限)',
     globalScope: 'gm_data_000.contract',
-    guards: [{ at: '', platformOnly: true }, { at: '', menu: 'contract' }],
+    guards: [{ at: '', platformOnly: true }, { at: '', functionPower: { menu: 'contract', action: 'delete' } }],
   },
 
   // ==================== 账户(租户开户与资料:仅平台管理员) ====================
@@ -211,8 +213,9 @@ const ROUTES = [
     // 否则未开该菜单的操作员表单里这个下拉会空;/tagset 仍属选择设置页自身功能,保持严格校验 20261010 修复,
     path: '/api/taginfo-save',
     router: taginfoSaveROutes,
-    note: '标签新建/修改',
-    guards: [{ at: '/insert', menu: 'tagInfo' }],
+    note: '标签保存(功能级权限:选择设置)',
+    // 选择设置页保存按钮为“设置提交”,动作键用 setting(不再复用通用 modify)20261023 调整,
+    guards: [{ at: '/insert', functionPower: { menu: 'tagInfo', action: 'setting' } }],
   },
   {
     path: '/api/taginfo-query',
@@ -225,12 +228,12 @@ const ROUTES = [
   {
     path: '/api/operator-save',
     router: operatorSaveROutes,
-    note: '操作员新建/修改/重置密码/授权',
+    note: '操作员新建/修改/重置密码/授权(功能级权限)',
     guards: [
-      { at: '/insert', menu: 'operator' },
-      { at: '/update', menu: 'operator' },
-      { at: '/password', menu: 'operator' },
-      { at: '/power', menu: 'operator' },
+      { at: '/insert', functionPower: { menu: 'operator', action: 'create' } },
+      { at: '/update', functionPower: { menu: 'operator', action: 'modify' } },
+      { at: '/password', functionPower: { menu: 'operator', action: 'modify' } },
+      { at: '/power', functionPower: { menu: 'operator', action: 'power' } },
     ],
   },
   {
@@ -242,14 +245,17 @@ const ROUTES = [
   {
     path: '/api/operator-delete',
     router: operatorDeleteROutes,
-    note: '操作员删除',
-    guards: [{ at: '', menu: 'operator' }],
+    note: '操作员删除(功能级权限)',
+    guards: [{ at: '', functionPower: { menu: 'operator', action: 'delete' } }],
   },
   {
     path: '/api/operatorPower-save',
     router: operatorPowerSaveROutes,
-    note: '操作员权限保存',
-    guards: [{ at: '/power', menu: 'operator' }],
+    note: '操作员权限保存(菜单总开关 useMenu + 功能级权限白名单,均需操作人员授权动作)',
+    guards: [
+      { at: '/power', functionPower: { menu: 'operator', action: 'power' } },
+      { at: '/config', functionPower: { menu: 'operator', action: 'power' } },
+    ],
   },
   {
     path: '/api/operatorPower-query',
@@ -264,8 +270,9 @@ const ROUTES = [
     // 不要求调用者具备“园区设置”菜单权限:未开该菜单的操作员会 403,表现为区域下拉空白 20261010 修复,
     path: '/api/park-save',
     router: parkSaveROutes,
-    note: '园区/区域新建修改',
-    guards: [{ at: '/insert', menu: 'park' }],
+    note: '园区/区域保存(功能级权限:园区设置-设置提交)',
+    // 园区设置页保存按钮为“设置提交”,动作键用 setting(与选择设置同口径,不再复用通用 modify)20261023 调整,
+    guards: [{ at: '/insert', functionPower: { menu: 'park', action: 'setting' } }],
   },
   {
     path: '/api/park-query',
@@ -278,8 +285,9 @@ const ROUTES = [
   {
     path: '/api/receiptConfig-save',
     router: receiptConfigSaveROutes,
-    note: '收据配制保存',
-    guards: [{ at: '', menu: 'receiptConfig' }],
+    note: '收据配制保存(功能级权限:收据配制-设置提交)',
+    // 收据配制页保存按钮为“设置提交”,动作键用 setting(与选择设置/园区设置同口径,不再复用通用 modify)20261023 调整,
+    guards: [{ at: '', functionPower: { menu: 'receiptConfig', action: 'setting' } }],
   },
   {
     path: '/api/receiptConfig-query',
@@ -307,18 +315,20 @@ const ROUTES = [
   {
     path: '/api/cardColor-save',
     router: cardColorSaveROutes,
-    note: '卡片配色保存',
-    guards: [{ at: '', menu: 'cardColor' }],
+    note: '卡片配色保存(功能级权限:卡片颜色-设置提交)',
+    // 卡片颜色页保存按钮为“设置提交”,动作键用 setting(与其它配置类菜单同口径,不再复用通用 modify)20261023 调整,
+    guards: [{ at: '', functionPower: { menu: 'cardColor', action: 'setting' } }],
   },
 
   // ==================== 墓位设置(菜单 name=room) ====================
   {
     path: '/api/room-save',
     router: roomSaveROutes,
-    note: '墓位新建(含批量建位)/修改',
+    note: '墓位新建(含批量建位,功能级权限)/修改(按菜单粗粒度:modify UI 按业务态门控,不按权限列)',
     insertOwnershipExempt: '新建墓位尚无主键可反查 region,而 body 直接携带 region,已由全局 requireRegionScope 按名单拦下(不在名单即 403)',
+    partialFunctionMenu: true,
     guards: [
-      { at: '/insert', menu: 'room' },
+      { at: '/insert', functionPower: { menu: 'room', action: 'create' } },
       { at: '/update', menu: 'room', ownership: ownRoomScope },
     ],
   },
@@ -331,7 +341,8 @@ const ROUTES = [
   {
     path: '/api/room-delete',
     router: roomDeleteROutes,
-    note: '墓位软删',
+    note: '墓位软删(按菜单粗粒度:delete UI 按业务态门控,不按权限列)',
+    partialFunctionMenu: true,
     guards: [{ at: '', menu: 'room', ownership: ownRoomScope }],
   },
 
@@ -348,13 +359,16 @@ const ROUTES = [
   },
 
   // ==================== 墓位业务(菜单 103101) ====================
+  // 本菜单是"一页多功能"集成页(销售/下葬/联系人/预定/安葬证/备注…共用同一写接口,靠 body/query 的 type 分流),
+  // 粗粒度 menu(useMenu)无法区分各功能,故写接口改走 functionPower:在 useMenu 之上再按"功能×动作"白名单收口;
+  // 功能键运行期由 catalog 依 type 解析,动作由路由子路径显式声明。区域轴仍由 ownership(operator.region)把守,不动 20261023 新增,
   {
     path: '/api/gravePlotBusiness-save',
     router: gravePlotBusinessSaveROutes,
-    note: '墓位业务新建/修改',
+    note: '墓位业务新建/修改(功能级权限)',
     guards: [
-      { at: '/insert', menu: 'gravePlotBusiness', ownership: ownRoomScope },
-      { at: '/update', menu: 'gravePlotBusiness', ownership: ownRoomScope },
+      { at: '/insert', functionPower: { menu: 'gravePlotBusiness', action: 'create' }, ownership: ownRoomScope },
+      { at: '/update', functionPower: { menu: 'gravePlotBusiness', action: 'modify' }, ownership: ownRoomScope },
     ],
   },
   {
@@ -366,16 +380,19 @@ const ROUTES = [
   {
     path: '/api/gravePlotBusiness-delete',
     router: gravePlotBusinessDeleteROutes,
-    note: '墓位业务删除',
-    guards: [{ at: '', menu: 'gravePlotBusiness', ownership: ownRoomScope }],
+    note: '墓位业务删除(功能级权限)',
+    guards: [{ at: '', functionPower: { menu: 'gravePlotBusiness', action: 'delete' }, ownership: ownRoomScope }],
   },
   {
-    // 销售取消:后端补齐“仅平台管理员”口径,与前端入口 isAccount===1 网关一致
-    // (原仅菜单权限与注释不符,审查修复 20261021 ⑤),
+    // 销售删除(原“取消销售”):按钮已改名“删除”,功能级权限固定归 sale.delete;
+    // 20261023 按权限矩阵开放到具体操作员,移除此前“仅平台管理员”的 platformOnly 口径,
+    // 区域归属仍由 ownership(operator.region)把守;接口路径沿用 cancelSale 仅为兼容既有前端调用,
     path: '/api/gravePlotBusiness-cancelSale',
     router: gravePlotBusinessCancelSaleROutes,
-    note: '取消销售(仅平台管理员)',
-    guards: [{ at: '', platformOnly: true, menu: 'gravePlotBusiness', ownership: ownRoomScope }],
+    note: '删除销售/原取消销售(功能级权限)',
+    guards: [
+      { at: '', functionPower: { menu: 'gravePlotBusiness', fn: 'sale', action: 'delete' }, ownership: ownRoomScope },
+    ],
   },
 
   // ==================== 查询统计(菜单 1051xx) ====================
@@ -389,8 +406,8 @@ const ROUTES = [
   {
     path: '/api/managementPeriod-save',
     router: managementPeriodSaveRoutes,
-    note: '管理期限修改',
-    guards: [{ at: '/update', menu: 'managementPeriod', ownership: ownRoomScope }],
+    note: '管理期限修改(功能级权限)',
+    guards: [{ at: '/update', functionPower: { menu: 'managementPeriod', action: 'modify' }, ownership: ownRoomScope }],
   },
   {
     path: '/api/managementPeriod',
@@ -413,10 +430,10 @@ const ROUTES = [
   {
     path: '/api/transferOut-save',
     router: transferOutSaveROutes,
-    note: '迁出新建/修改',
+    note: '迁出新建/修改(功能级权限)',
     guards: [
-      { at: '/insert', menu: 'transferOut', ownership: ownRoomScope },
-      { at: '/update', menu: 'transferOut', ownership: ownRoomScope },
+      { at: '/insert', functionPower: { menu: 'transferOut', action: 'create' }, ownership: ownRoomScope },
+      { at: '/update', functionPower: { menu: 'transferOut', action: 'modify' }, ownership: ownRoomScope },
     ],
   },
   {
@@ -431,18 +448,18 @@ const ROUTES = [
   {
     path: '/api/transferOut-delete',
     router: transferOutDeleteROutes,
-    note: '迁出记录作废',
-    guards: [{ at: '', menu: 'transferOut', ownership: ownTransferOutScope }],
+    note: '迁出记录作废(功能级权限)',
+    guards: [{ at: '', functionPower: { menu: 'transferOut', action: 'delete' }, ownership: ownTransferOutScope }],
   },
 
   // ==================== 管理费收款(菜单 104101) ====================
   {
     path: '/api/adminfee-save',
     router: adminfeeSaveROutes,
-    note: '管理费收款新建/修改',
+    note: '管理费收款新建/修改(功能级权限)',
     guards: [
-      { at: '/insert', menu: 'adminfee', ownership: ownRoomScope },
-      { at: '/update', menu: 'adminfee', ownership: ownRoomScope },
+      { at: '/insert', functionPower: { menu: 'adminfee', action: 'create' }, ownership: ownRoomScope },
+      { at: '/update', functionPower: { menu: 'adminfee', action: 'modify' }, ownership: ownRoomScope },
     ],
   },
   {
@@ -454,8 +471,8 @@ const ROUTES = [
   {
     path: '/api/adminfee-delete',
     router: adminfeeDeleteROutes,
-    note: '管理费记录作废',
-    guards: [{ at: '', menu: 'adminfee', ownership: ownAdminfeeScope }],
+    note: '管理费记录作废(功能级权限)',
+    guards: [{ at: '', functionPower: { menu: 'adminfee', action: 'delete' }, ownership: ownAdminfeeScope }],
   },
 
   // ==================== 联系人取数(供墓位业务详情聚合与联系人查询页) ====================
@@ -468,27 +485,14 @@ const ROUTES = [
     guards: [{ at: '', menu: 'contactsQuery', queryDetail: true, ownership: ownRoomScope }],
   },
 
-  // ==================== 墓位预定(菜单 103104) ====================
-  {
-    path: '/api/reserve-save',
-    router: reserveSaveROutes,
-    note: '预定新建/修改',
-    guards: [
-      { at: '/insert', menu: 'reserve', ownership: ownRoomScope },
-      { at: '/update', menu: 'reserve', ownership: ownRoomScope },
-    ],
-  },
+  // ==================== 预定取数(供墓位业务详情聚合) ====================
+  // 墓区预定登记页(菜单 103104)已下线:预定的新建/修改/删除统一走 /api/gravePlotBusiness-{save,delete}(type=reserve),
+  // 本前缀只留详情取数(旧独立预定页下线后由墓位业务页承接),菜单挂存活的「墓位业务」作为非详情路径的兜底口径 20261023 调整,
   {
     path: '/api/reserve-query',
     router: reserveQueryROutes,
-    note: '预定记录取数',
-    guards: [{ at: '/get-by-room', ownership: ownRoomScope }, { at: '', menu: 'reserve', queryDetail: true }],
-  },
-  {
-    path: '/api/reserve-delete',
-    router: reserveDeleteROutes,
-    note: '预定记录作废',
-    guards: [{ at: '', menu: 'reserve', ownership: ownRoomScope }],
+    note: '预定记录取数(详情聚合;登记页已下线)',
+    guards: [{ at: '/get-by-room', ownership: ownRoomScope }, { at: '', menu: 'gravePlotBusiness', queryDetail: true }],
   },
 
   // ==================== 账户权限与首页 ====================
@@ -528,17 +532,47 @@ function buildMountPath(path, at) {
 // loginOnly 不给理由)必须在启动时立刻炸出来,而不是等到线上少了一道鉴权才发现 20261021 新增,
 function assertGuardEntry(entry, guard) {
   const label = `${entry.path}${guard.at || ''}`;
-  // 口径合法组合:page 级权限(menu / anyMenu 二选一)可与 platformOnly 叠加(如取消销售需“仅平台管理员
+  // 口径合法组合:page 级权限(menu / anyMenu 二选一)可与 platformOnly 叠加(如全局管理接口需“仅平台管理员
   // 且具备菜单权限”);loginOnly 与任何权限口径互斥(否则豁免意图不明),
   const hasMenu = Boolean(guard.menu);
   const hasAnyMenu = Boolean(guard.anyMenu);
+  const hasFunctionPower = Boolean(guard.functionPower);
   if (hasMenu && hasAnyMenu) {
     throw new Error(`路由注册表守卫配置错误(${label}):menu 与 anyMenu 不能同时声明`);
   }
-  if (guard.loginOnly && (hasMenu || hasAnyMenu || guard.platformOnly)) {
+  // functionPower 自带菜单(useMenu)校验,与 menu/anyMenu 同时声明属冗余(会出现两套菜单口径),
+  if (hasFunctionPower && (hasMenu || hasAnyMenu)) {
+    throw new Error(`路由注册表守卫配置错误(${label}):functionPower 已含菜单校验,不得再声明 menu/anyMenu`);
+  }
+  if (hasFunctionPower) {
+    const fp = guard.functionPower;
+    if (!fp.menu) {
+      throw new Error(`路由注册表守卫配置错误(${label}):functionPower 必须声明 menu`);
+    }
+    if (!permissionTemplate.isFunctionMenu(fp.menu)) {
+      throw new Error(`路由注册表守卫配置错误(${label}):functionPower 的 menu '${fp.menu}' 未纳入功能级管控(menu.powerConfig 模板)`);
+    }
+    if (fp.fn && !permissionTemplate.isValidFn(fp.menu, fp.fn)) {
+      throw new Error(`路由注册表守卫配置错误(${label}):functionPower 的 fn '${fp.fn}' 不在菜单 '${fp.menu}' 的功能模板内`);
+    }
+    if (fp.fn && fp.action && !permissionTemplate.isValidAction(fp.menu, fp.fn, fp.action)) {
+      throw new Error(`路由注册表守卫配置错误(${label}):functionPower 的 action '${fp.action}' 不属于 '${fp.menu}.${fp.fn}'`);
+    }
+    // fn 缺省时由运行期解析(墓位业务按 type,单功能菜单按菜单名),此处仍校验动作至少存在于该菜单某个功能内,
+    // 防止注册表写进模板里根本不存在的动作(如 create 拼成 creat)而要到运行期才静默放行,
+    if (!fp.fn && fp.action) {
+      const actionKnown = permissionTemplate
+        .getFunctions(fp.menu)
+        .some((fn) => permissionTemplate.getFunctionActions(fp.menu, fn).includes(fp.action));
+      if (!actionKnown) {
+        throw new Error(`路由注册表守卫配置错误(${label}):functionPower 的 action '${fp.action}' 不属于菜单 '${fp.menu}' 的任何功能`);
+    }
+    }
+  }
+  if (guard.loginOnly && (hasMenu || hasAnyMenu || hasFunctionPower || guard.platformOnly)) {
     throw new Error(`路由注册表守卫配置错误(${label}):loginOnly 不得与权限口径同时声明`);
   }
-  const hasPermission = hasMenu || hasAnyMenu || Boolean(guard.platformOnly);
+  const hasPermission = hasMenu || hasAnyMenu || hasFunctionPower || Boolean(guard.platformOnly);
   if (!hasPermission && !guard.loginOnly) {
     // 允许“纯归属校验”的守卫项(无权限字段),但必须锁定具体子路径,否则等于整前缀无权限声明,
     if (!guard.ownership || !guard.at) {
@@ -575,6 +609,12 @@ function buildGuardMiddlewares(guard) {
     middlewares.push(rbac.requirePowerByAnyMenuName(...guard.anyMenu));
   } else if (guard.menu) {
     middlewares.push(rbac.requirePowerByMenuName(guard.menu, guard.openPaths));
+  } else if (guard.functionPower) {
+    // fn 缺省时由 rbac 运行期按 catalog 从 body/query 的 type 解析;action 由注册表按子路径显式声明,
+    middlewares.push(rbac.requireFunctionPower(guard.functionPower.menu, {
+      fn: guard.functionPower.fn,
+      action: guard.functionPower.action,
+    }));
   }
   return middlewares;
 }
@@ -645,7 +685,7 @@ function guardCoversRoute(guardMountPath, routeFullPath) {
 }
 
 function guardHasRealPermission(guard) {
-  return Boolean(guard.menu) || Boolean(guard.anyMenu) || Boolean(guard.platformOnly);
+  return Boolean(guard.menu) || Boolean(guard.anyMenu) || Boolean(guard.platformOnly) || Boolean(guard.functionPower);
 }
 
 // 详情聚合放行名单与注册表逐项对账(审查修复 20261021 二轮 P1-3):两张表任一侧单独改动都会造成口径不一致 ——
@@ -786,6 +826,27 @@ function auditRouteRegistry(routes = ROUTES) {
       }
       if (isWriteMethod(route.methods) && !covered.some((guard) => guardHasRealPermission(guard)) && !entry.loginOnlyWrites) {
         violations.push(`写接口 ${route.methods.join('|')} ${routeFullPath} 仅靠登录即可调用:要么补权限守卫,要么在条目里写明 loginOnlyWrites 理由`);
+      }
+      // 纳入功能级管控(menu.powerConfig 模板非空)的菜单,其写接口必须走功能级权限(functionPower),不得回退到粗粒度
+      // menu(useMenu 全权),否则又会出现"开通菜单=该菜单所有动作可用"的失控;取数(query)为只读不受约束 20261023 新增,
+      // 泛化自原先仅 gravePlotBusiness 的断言,现覆盖 transferOut/adminfee/managementPeriod/operator 等单功能菜单,
+      if (isWriteMethod(route.methods) && !covered.some((guard) => guard.functionPower)) {
+        // 部分菜单按设计只对“新建”做功能级收口(如 room 仅 create 按钮受权限列控制),其余写接口仍按菜单粗粒度
+        // 守卫(其 modify/delete UI 按业务态而非权限列门控,收紧会让可见按钮 403),条目声明 partialFunctionMenu 显式豁免,
+        if (entry.partialFunctionMenu) {
+          continue;
+        }
+        const declaredMenus = new Set();
+        covered.forEach((guard) => {
+          if (guard.menu) {
+            declaredMenus.add(guard.menu);
+          }
+          (guard.anyMenu || []).forEach((name) => declaredMenus.add(name));
+        });
+        const functionMenu = [...declaredMenus].find((name) => permissionTemplate.isFunctionMenu(name));
+        if (functionMenu) {
+          violations.push(`功能级管控菜单 '${functionMenu}' 的写接口 ${route.methods.join('|')} ${routeFullPath} 必须走 functionPower(功能级权限),不得仅用 menu`);
+        }
       }
     }
   }

@@ -17,6 +17,7 @@ const rbac = require('./rbac');
 // 原先本文件里“守卫挂载表 + 路由挂载表”两张手工清单共 90+ 行,顺序即安全但只能靠注释与人工纪律维持,
 // 现在新增接口只需在 routeRegistry.js 加一条条目,守卫与路由由 mountApiRoutes 按固定顺序统一挂载,
 const routeRegistry = require('./routeRegistry');
+const permissionTemplate = require('./lib/permissionTemplate');
 const httpDefaults = require('./httpDefaults');
 const pkg = require('./package.json');
 
@@ -159,16 +160,10 @@ app.use(function (req, res, next) {
 app.use(rbac.requireRegionScope);
 
 // 业务接口挂载:守卫(区域归属/菜单权限/仅平台管理员)与路由均由声明式注册表驱动,
-// 挂载前会先跑一轮注册表体检(auditRouteRegistry),任何接口未登记守卫则直接抛错拒绝启动,
-// 原先这里需要同时维护“守卫挂载表”与“路由挂载表”两张清单且靠注释保证守卫先注册 20261021 审查修复 P1-4,
-// 区域归属口径(详情读/修改/软删按主键直取直写时校验记录所属区域)已随各条目声明,
-// 名单为空(平台管理员/未配区域)或参数缺失时直接放行,不影响存量调用 20261021 审查修复④,
-routeRegistry.mountApiRoutes(app);
+// 挂载前会先跑一轮注册表体检(auditRouteRegistry),任何接口未登记守卫则直接抛错拒绝启动;
+// 体检中的 functionPower 校验依赖 gm_data_000.menu.powerConfig 功能模板,故挂载动作下沉到下方
+// 启动前置 Promise(模板加载完成后再挂),404/终态错误中间件随之在全部业务路由之后注册 20261023 改造,
 
-app.use(httpDefaults.notFound);
-
-// 终态错误中间件:统一回 JSON 信封并把堆栈留在日志(实现见 httpDefaults.js),
-app.use(httpDefaults.finalError);
 // 传输层超时(审查修复 20261021 二轮 P2-23):本服务此前完全没设 HTTP 超时,一个只发头不发体的
 // 慢连接可以按 Node 默认值占住 socket 五分钟;阈值均走配置(置 0 即不改行为),口径与回读见 httpDefaults.js,
 
@@ -181,10 +176,23 @@ if (config.securityFatal.length > 0) {
 
 // 启动前幂等建表:确保登录态表 login_session 存在,线上老库缺表曾导致登录 500 20260917 修复,
 // tenant.ensureLoaded:首次拉取已登记租户库名单(拉不到不致命,闸门会降级为仅形态白名单),
+// permissionTemplate.loadFromDatabase:加载 menu.powerConfig 功能模板(列缺失会直接拒绝启动,
+// 提示先执行 scripts/add-menu-power-config.js),
 let server = null;
 // applyServerTimeouts 的回读值(启动后才能拿到,初始为 null):/health 会把它透出供运维核对生效值,
 let appliedTimeouts = null;
-Promise.all([loginState.ensureTable(), device.ensureTable(), tenant.ensureLoaded()]).then(() => {
+Promise.all([
+  loginState.ensureTable(),
+  device.ensureTable(),
+  tenant.ensureLoaded(),
+  permissionTemplate.loadFromDatabase(),
+]).then(() => {
+  // 模板就绪后再挂业务路由:mountApiRoutes 内的注册表体检会按 menu.powerConfig 校验每个 functionPower 守卫,
+  // 配置错误直接抛错进入下方 catch,进程在 listen 前退出(不会带病上线) 20261023 改造,
+  routeRegistry.mountApiRoutes(app);
+  // 404 与终态错误中间件必须在全部业务路由之后注册,因此随挂载一起下沉到此处,
+  app.use(httpDefaults.notFound);
+  app.use(httpDefaults.finalError);
   server = app.listen(config.app.port, () => {
     appliedTimeouts = httpDefaults.applyServerTimeouts(server);
     console.log(`Server is running on port ${config.app.port}`);
@@ -194,7 +202,7 @@ Promise.all([loginState.ensureTable(), device.ensureTable(), tenant.ensureLoaded
     config.securityWarnings.forEach((warning) => console.warn('[security]', warning));
   });
 }).catch((error) => {
-  console.error('[startup] 启动前置检查(建表/租户名单)失败,拒绝启动:', error.message);
+  console.error('[startup] 启动前置检查(建表/租户名单/功能模板)失败,拒绝启动:', error.message);
   process.exit(1);
 });
 

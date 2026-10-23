@@ -87,7 +87,6 @@ INSERT INTO `account_power` VALUES ('102106', 1, 0, 0, 0, 0, 0, 0, 'menu.cardCol
 INSERT INTO `account_power` VALUES ('103100', 1, 0, 0, 0, 0, 0, 0, 'menu.operate', 'gm_data_000', 1, '', 'menu.operateDescribe');
 INSERT INTO `account_power` VALUES ('103101', 1, 1, 1, 1, 0, 0, 0, 'menu.gravePlotBusiness', 'gm_data_000', 2, '', 'menu.gravePlotBusinessDescribe');
 INSERT INTO `account_power` VALUES ('103107', 1, 1, 1, 0, 0, 0, 0, 'menu.room', 'gm_data_000', 2, '', 'menu.roomDescribe');
-INSERT INTO `account_power` VALUES ('103104', 1, 1, 1, 1, 0, 0, 0, 'menu.reserve', 'gm_data_000', 2, '', 'menu.reserveDescribe');
 INSERT INTO `account_power` VALUES ('103106', 1, 1, 1, 1, 0, 0, 0, 'menu.transferOut', 'gm_data_000', 2, '', 'menu.transferOutDescribe');
 INSERT INTO `account_power` VALUES ('104100', 1, 0, 0, 0, 0, 0, 0, 'menu.fee', 'gm_data_000', 1, '', 'menu.feeDescribe');
 INSERT INTO `account_power` VALUES ('103108', 1, 1, 1, 1, 0, 0, 0, 'menu.admifee', 'gm_data_000', 2, '', 'menu.admifeeDescribe');
@@ -143,6 +142,7 @@ CREATE TABLE `menu` (
   `parent_id` varchar(80) DEFAULT '',
   `zh_CN` varchar(80) NOT NULL DEFAULT '',
   `en_US` varchar(80) NOT NULL DEFAULT '' COMMENT '修改日期',
+  `powerConfig` json DEFAULT NULL COMMENT '功能级权限模板({功能名:[动作...]});NULL=不做功能级管控',
   PRIMARY KEY (`id`) USING BTREE,
   KEY `pk_id_gm_accout` (`id`) USING BTREE,
   KEY `idx_menu_name` (`name`) USING BTREE
@@ -150,32 +150,39 @@ CREATE TABLE `menu` (
 
 -- ----------------------------
 -- Records of menu
+-- powerConfig(功能级权限模板):{功能名:[动作...]},单功能菜单功能键=菜单名;NULL=不做功能级管控 20261023 权限模板入库,
+-- 新增/调整功能级菜单时直接改本列(或执行 scripts/add-menu-power-config.js),后端启动时加载,
 -- ----------------------------
-INSERT INTO `menu` VALUES ('101100', '/users', 'users', 'LAYOUT', '/users/base', 'user-setting', '0', '用户管理', 'Users');
-INSERT INTO `menu` VALUES ('101101', 'account', 'account', '/account/index', '', NULL, '101100', '账户信息', 'Account');
-INSERT INTO `menu` VALUES ('101102', 'contract', 'contract', '/contract/index', '', NULL, '101100', '合同列表', 'Contract');
-INSERT INTO `menu` VALUES ('102100', '/set', 'set', 'LAYOUT', '/set/base', '\r\n\r\nsetting-1', '0', '基础设置', 'Settings');
-INSERT INTO `menu` VALUES ('102102', 'taginfo', 'tagInfo', '/taginfo/index', '', NULL, '102100', '选择设置', 'Selection Settings');
-INSERT INTO `menu` VALUES ('102103', 'park', 'park', '/park/index', '', NULL, '102100', '园区设置', 'Park Settings');
-INSERT INTO `menu` VALUES ('102104', 'operator', 'operator', '/operator/index', '', NULL, '102100', '操作人员', 'Operator');
-INSERT INTO `menu` VALUES ('102105', 'receiptConfig', 'receiptConfig', '/receiptConfig/index', '', NULL, '102100', '收据配制', 'receipt Config');
-INSERT INTO `menu` VALUES ('102106', 'cardColor', 'cardColor', '/cardColor/index', '', NULL, '102100', '卡片颜色', 'Card Colors');
-INSERT INTO `menu` VALUES ('103100', '/operate', 'operate', 'LAYOUT', '/operate/base', 'assignment', '0', '墓区业务', 'Cemetery Business');
-INSERT INTO `menu` VALUES ('103101', 'gravePlotBusiness', 'gravePlotBusiness', '/gravePlotBusiness/index', '', NULL, '103100', '墓位业务', 'Grave Plot Business');
-INSERT INTO `menu` VALUES ('103107', 'room', 'room', '/room/index', '', NULL, '103100', '墓位设置', 'Cemetery Area Settings');
+INSERT INTO `menu` VALUES ('101100', '/users', 'users', 'LAYOUT', '/users/base', 'user-setting', '0', '用户管理', 'Users', NULL);
+INSERT INTO `menu` VALUES ('101101', 'account', 'account', '/account/index', '', NULL, '101100', '账户信息', 'Account', '{"account":["create","modify","delete"]}');
+INSERT INTO `menu` VALUES ('101102', 'contract', 'contract', '/contract/index', '', NULL, '101100', '合同列表', 'Contract', '{"contract":["create","modify","delete"]}');
+INSERT INTO `menu` VALUES ('102100', '/set', 'set', 'LAYOUT', '/set/base', '\r\n\r\nsetting-1', '0', '基础设置', 'Settings', NULL);
+INSERT INTO `menu` VALUES ('102102', 'taginfo', 'tagInfo', '/taginfo/index', '', NULL, '102100', '选择设置', 'Selection Settings', '{"tagInfo":["setting"]}');
+INSERT INTO `menu` VALUES ('102103', 'park', 'park', '/park/index', '', NULL, '102100', '园区设置', 'Park Settings', '{"park":["setting"]}');
+INSERT INTO `menu` VALUES ('102104', 'operator', 'operator', '/operator/index', '', NULL, '102100', '操作人员', 'Operator', '{"operator":["create","modify","delete","power"]}');
+INSERT INTO `menu` VALUES ('102105', 'receiptConfig', 'receiptConfig', '/receiptConfig/index', '', NULL, '102100', '收据配制', 'receipt Config', '{"receiptConfig":["setting"]}');
+INSERT INTO `menu` VALUES ('102106', 'cardColor', 'cardColor', '/cardColor/index', '', NULL, '102100', '卡片颜色', 'Card Colors', '{"cardColor":["setting"]}');
+INSERT INTO `menu` VALUES ('103100', '/operate', 'operate', 'LAYOUT', '/operate/base', 'assignment', '0', '墓区业务', 'Cemetery Business', NULL);
+INSERT INTO `menu` VALUES ('103101', 'gravePlotBusiness', 'gravePlotBusiness', '/gravePlotBusiness/index', '', NULL, '103100', '墓位业务', 'Grave Plot Business', '{"sale":["create","modify","delete"],"buried":["create","modify","delete"],"contacts":["create","modify","delete"],"reserve":["create","modify","delete"],"certificate":["modify"],"remark":["modify"]}');
+-- 103101 的 certificate（安葬证设置）只保留 modify：首次保存也走修改入口（后端 update 在 idCert=0 时回落到插入），
+-- 权限页不再提供“新建”勾选；存量库执行 npm run db:remove-certificate-create 清理模板与已授权行 20261023 调整,
+-- 103101 的 business（默认业务形态）功能键已于 20261023 从模板移除：该形态在前端没有入口、也没有任何可配按钮，
+-- 权限页不再渲染这一行；存量库执行 npm run db:remove-business-function 同步清理模板与已授权行,
+INSERT INTO `menu` VALUES ('103107', 'room', 'room', '/room/index', '', NULL, '103100', '墓位设置', 'Cemetery Area Settings', '{"room":["create"]}');
 -- 103102 墓区销售 / 103103 墓区下葬 / 103105 墓位联系 已于 20261021 三轮下线(功能由 103101 墓位业务的
 -- 购墓人/下葬者/联系人形态承接),对应接口与前端页面同步删除,不要再把这三行菜单加回,
-INSERT INTO `menu` VALUES ('103104', 'reserve', 'reserve', '/reserve/index', '', NULL, '103100', '墓区预定', 'Cemetery Reservations');
-INSERT INTO `menu` VALUES ('103106', 'transferOut', 'transferOut', '/transferOut/index', '', NULL, '103100', '墓位迁出', 'Plot Transfer Out');
-INSERT INTO `menu` VALUES ('104100', '/fee', 'fee', 'LAYOUT', '/fee/base', '\r\nalarm-add', '0', '收费管理', 'Fee Management');
-INSERT INTO `menu` VALUES ('103108', 'adminfee', 'adminfee', '/adminfee/index', '', NULL, '103100', '管理费用收款', 'Admin Fee Collection');
-INSERT INTO `menu` VALUES ('103109', 'managementPeriod', 'managementPeriod', '/managementPeriod/index', '', NULL, '103100', '管理期限维护', 'Management Period');
-INSERT INTO `menu` VALUES ('105100', '/query', 'query', 'LAYOUT', '/query/base', '\r\nalarm-add', '0', '查询统计', 'Query Statistics');
-INSERT INTO `menu` VALUES ('105101', 'saleQuery', 'saleQuery', '/saleQuery/index', '', '\r\n', '105100', '墓区销售查询', 'Cemetery Sale Query');
-INSERT INTO `menu` VALUES ('105102', 'buriedQuery', 'buriedQuery', '/buriedQuery/index', '', '\r\n', '105100', '墓区下葬查询', 'Cemetery Burial Query');
-INSERT INTO `menu` VALUES ('105103', 'adminfeeQuery', 'adminfeeQuery', '/adminfeeQuery/index', '', '\r\n', '105100', '管理收款查询', 'Admin Fee Query');
-INSERT INTO `menu` VALUES ('105104', 'contactsQuery', 'contactsQuery', '/contactsQuery/index', '', '\r\n', '105100', '墓位联系查询', 'Plot Contact Query');
-INSERT INTO `menu` VALUES ('105105', 'transferOutQuery', 'transferOutQuery', '/transferOut/index', '', '\r\n', '105100', '墓位迁出查询', 'Plot Transfer Out Query');
+-- 103104 墓区预定 已于 20261023 下线(预定新建/修改/删除由 103101 墓位业务的「预定期」入口承接,
+-- 功能级动作沿用上文 103101 菜单模板中的 reserve 项),对应写接口与前端页面同步删除,不要再把这行菜单加回,
+INSERT INTO `menu` VALUES ('103106', 'transferOut', 'transferOut', '/transferOut/index', '', NULL, '103100', '墓位迁出', 'Plot Transfer Out', '{"transferOut":["create","modify","delete"]}');
+INSERT INTO `menu` VALUES ('104100', '/fee', 'fee', 'LAYOUT', '/fee/base', '\r\nalarm-add', '0', '收费管理', 'Fee Management', NULL);
+INSERT INTO `menu` VALUES ('103108', 'adminfee', 'adminfee', '/adminfee/index', '', NULL, '103100', '管理费用收款', 'Admin Fee Collection', '{"adminfee":["create","modify","delete"]}');
+INSERT INTO `menu` VALUES ('103109', 'managementPeriod', 'managementPeriod', '/managementPeriod/index', '', NULL, '103100', '管理期限维护', 'Management Period', '{"managementPeriod":["modify"]}');
+INSERT INTO `menu` VALUES ('105100', '/query', 'query', 'LAYOUT', '/query/base', '\r\nalarm-add', '0', '查询统计', 'Query Statistics', NULL);
+INSERT INTO `menu` VALUES ('105101', 'saleQuery', 'saleQuery', '/saleQuery/index', '', '\r\n', '105100', '墓区销售查询', 'Cemetery Sale Query', NULL);
+INSERT INTO `menu` VALUES ('105102', 'buriedQuery', 'buriedQuery', '/buriedQuery/index', '', '\r\n', '105100', '墓区下葬查询', 'Cemetery Burial Query', NULL);
+INSERT INTO `menu` VALUES ('105103', 'adminfeeQuery', 'adminfeeQuery', '/adminfeeQuery/index', '', '\r\n', '105100', '管理收款查询', 'Admin Fee Query', NULL);
+INSERT INTO `menu` VALUES ('105104', 'contactsQuery', 'contactsQuery', '/contactsQuery/index', '', '\r\n', '105100', '墓位联系查询', 'Plot Contact Query', NULL);
+INSERT INTO `menu` VALUES ('105105', 'transferOutQuery', 'transferOutQuery', '/transferOut/index', '', '\r\n', '105100', '墓位迁出查询', 'Plot Transfer Out Query', NULL);
 
 -- ----------------------------
 -- Table structure for operator
@@ -218,12 +225,7 @@ CREATE TABLE `operator_power` (
   `idOperator` bigint(20) DEFAULT NULL COMMENT 'ID操作员',
   `idMenu` varchar(80) DEFAULT NULL COMMENT 'ID菜单',
   `useMenu` smallint(6) DEFAULT '0' COMMENT '使用',
-  `useCreate` smallint(6) DEFAULT '0' COMMENT '新建',
-  `useModify` smallint(6) DEFAULT '0' COMMENT '修改',
-  `useDelete` smallint(6) DEFAULT '0' COMMENT '删除',
-  `useExamine` smallint(6) DEFAULT '0' COMMENT '核对',
-  `useFinish` smallint(6) DEFAULT '0' COMMENT '完成',
-  `usePower` smallint(6) DEFAULT '0' COMMENT '权限',
+  `powerConfig` json DEFAULT NULL COMMENT '功能权限白名单(NULL=不限/兼容旧行为;非NULL=仅列出的1放行)',
   PRIMARY KEY (`idPower`) USING BTREE,
   KEY `idx_operator_power` (`idOperator`, `idMenu`, `useMenu`) USING BTREE
 ) ENGINE=InnoDB AUTO_INCREMENT=200000 DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
@@ -231,26 +233,26 @@ CREATE TABLE `operator_power` (
 -- ----------------------------
 -- Records of operator_power
 -- ----------------------------
-INSERT INTO `operator_power` VALUES (100001, 1000, '101100', 1, 0, 0, 0, 0, 0, 0);
-INSERT INTO `operator_power` VALUES (100002, 1000, '101101', 1, 1, 1, 1, 0, 0, 0);
-INSERT INTO `operator_power` VALUES (100003, 1000, '101102', 1, 1, 1, 1, 0, 0, 0);
-INSERT INTO `operator_power` VALUES (100004, 1000, '102100', 1, 0, 0, 0, 0, 0, 0);
-INSERT INTO `operator_power` VALUES (100005, 1000, '102102', 1, 0, 0, 0, 0, 0, 0);
-INSERT INTO `operator_power` VALUES (100006, 1000, '102103', 1, 0, 0, 0, 0, 0, 0);
-INSERT INTO `operator_power` VALUES (100007, 1000, '102104', 1, 1, 1, 1, 0, 0, 1);
-INSERT INTO `operator_power` VALUES (100008, 1000, '103100', 1, 0, 0, 0, 0, 0, 0);
-INSERT INTO `operator_power` VALUES (100009, 1000, '103107', 1, 1, 1, 0, 0, 1, 0);
-INSERT INTO `operator_power` VALUES (100012, 1000, '103104', 1, 1, 1, 1, 0, 0, 0);
-INSERT INTO `operator_power` VALUES (100014, 1000, '103106', 1, 1, 1, 1, 0, 0, 0);
-INSERT INTO `operator_power` VALUES (100015, 1000, '104100', 1, 0, 0, 0, 0, 0, 0);
-INSERT INTO `operator_power` VALUES (100016, 1000, '103108', 1, 1, 1, 1, 0, 0, 0);
-INSERT INTO `operator_power` VALUES (100017, 1000, '103109', 1, 0, 1, 0, 0, 0, 0);
-INSERT INTO `operator_power` VALUES (100018, 1000, '105100', 1, 0, 0, 0, 0, 0, 0);
-INSERT INTO `operator_power` VALUES (100019, 1000, '105101', 1, 0, 0, 0, 0, 0, 0);
-INSERT INTO `operator_power` VALUES (100020, 1000, '105102', 1, 0, 0, 0, 0, 0, 0);
-INSERT INTO `operator_power` VALUES (100021, 1000, '105103', 1, 0, 0, 0, 0, 0, 0);
-INSERT INTO `operator_power` VALUES (100022, 1000, '105104', 1, 0, 0, 0, 0, 0, 0);
-INSERT INTO `operator_power` VALUES (100023, 1000, '105105', 1, 0, 0, 0, 0, 0, 0);
+-- powerConfig(功能权限白名单):存量行一律 NULL = 不限功能,与改造前(useMenu 全权)行为一致 20261023 动作列迁移(已移除 useCreate/useModify/useDelete/useExamine/useFinish/usePower 六列),
+INSERT INTO `operator_power` VALUES (100001, 1000, '101100', 1, NULL);
+INSERT INTO `operator_power` VALUES (100002, 1000, '101101', 1, NULL);
+INSERT INTO `operator_power` VALUES (100003, 1000, '101102', 1, NULL);
+INSERT INTO `operator_power` VALUES (100004, 1000, '102100', 1, NULL);
+INSERT INTO `operator_power` VALUES (100005, 1000, '102102', 1, NULL);
+INSERT INTO `operator_power` VALUES (100006, 1000, '102103', 1, NULL);
+INSERT INTO `operator_power` VALUES (100007, 1000, '102104', 1, NULL);
+INSERT INTO `operator_power` VALUES (100008, 1000, '103100', 1, NULL);
+INSERT INTO `operator_power` VALUES (100009, 1000, '103107', 1, NULL);
+INSERT INTO `operator_power` VALUES (100014, 1000, '103106', 1, NULL);
+INSERT INTO `operator_power` VALUES (100015, 1000, '104100', 1, NULL);
+INSERT INTO `operator_power` VALUES (100016, 1000, '103108', 1, NULL);
+INSERT INTO `operator_power` VALUES (100017, 1000, '103109', 1, NULL);
+INSERT INTO `operator_power` VALUES (100018, 1000, '105100', 1, NULL);
+INSERT INTO `operator_power` VALUES (100019, 1000, '105101', 1, NULL);
+INSERT INTO `operator_power` VALUES (100020, 1000, '105102', 1, NULL);
+INSERT INTO `operator_power` VALUES (100021, 1000, '105103', 1, NULL);
+INSERT INTO `operator_power` VALUES (100022, 1000, '105104', 1, NULL);
+INSERT INTO `operator_power` VALUES (100023, 1000, '105105', 1, NULL);
 
 
 -- ----------------------------

@@ -3,12 +3,14 @@ const router = express.Router();
 const public = require('../public');
 module.exports = router;
 
-// 销售取消：作废某墓位的销售业务。按 idRoom 软删该墓位关联的 6 张业务表活动记录
+// 销售删除(原“取消销售”,按钮已改名“删除”,接口路径沿用 cancelSale 兼容旧调用):
+// 作废某墓位的销售业务。按 idRoom 软删该墓位关联的 6 张业务表活动记录
 // (sale/buried/contacts/adminfee/burial_cert/period_change，条件 isDeleted=0)，
 // 并将 room 回置为未销售/未下葬、清空编号/管理费起止日期/购墓人/安葬者/联系人/备注，
 // 全部语句单事务执行保证多表一致 20261008 新增,
 // 破坏性写改由 POST 承载：原 GET 可被预取/爬虫/链接点击触发，且改浏览器历史/日志留痕（审查修复 20261021 ⑤）;
-// 授权口径为持有 gravePlotBusiness 菜单权限（index.js requirePowerByMenuName），并非仅平台管理员,
+// 授权口径:routeRegistry 挂功能级 sale.delete + 区域归属守卫,可按操作员授权,
+// 20261023 权限矩阵改造移除仅平台管理员限制,
 router.post('/', async (req, res) => {
   const idRoom = public.parseNumericParam(req.body.idRoom);
   if (idRoom === null) {

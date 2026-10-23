@@ -64,6 +64,51 @@ DELETE FROM gm_data_000.operator_power WHERE idMenu  IN ('103102', '103103', '10
 
 发布顺序必须**先执行上面的 SQL，再（或同时）发前端**：前端路由唯一来源是菜单接口，若菜单行还在而页面组件已删，`utils/route` 的动态导入只能回落成“菜单能点、页面空白”的静默失败。业务数据表 `sale` / `buried` / `contacts` 不受影响，历史数据继续由墓位业务页与 105101/105102/105104 三个查询页读写。
 
+### 20261023：下线墓区预定登记页（存量库需执行一次）
+
+墓区预定（103104）已由「墓位业务」（103101）卡片上的「预定期」入口承接（预定新建/修改/删除一并在该页完成），代码侧同步删除了 `/api/reserve-save`、`/api/reserve-delete` 与前端 `pages/reserve` 页面（`/api/reserve-query` 保留，墓位详情聚合仍依赖它）。
+
+推荐直接运行幂等下线脚本（同时会校验并补齐 103101 菜单模板中的 `reserve` 功能动作）：
+
+```bash
+cd cemetery-api
+npm run db:offline-reserve-menu
+```
+
+脚本等价于下面三条 SQL（`menu` / `account_power` / `operator_power` 都是模板库 `gm_data_000` 的全局表，存量库执行一次即覆盖全部租户）：
+
+```sql
+DELETE FROM gm_data_000.menu           WHERE id     = '103104';
+DELETE FROM gm_data_000.account_power  WHERE idMenu = '103104';
+DELETE FROM gm_data_000.operator_power WHERE idMenu = '103104';
+```
+
+发布顺序同样是**先执行脚本，再（或同时）发前端**：否则已开通 103104 的租户会在侧边栏看到入口，点进去指向已删除的页面。`reserve` 业务表不受影响，历史预定记录仍由墓位业务页读取。
+
+### 20261023：移除墓位业务的默认业务形态权限行（存量库需执行一次）
+
+操作员权限页「墓位业务」功能矩阵里的“墓位业务”一行来自 `menu.powerConfig` 的 `business` 键，但该形态（默认落 `graveplotbusiness` 表）在前端没有入口、也没有任何可配按钮，已从模板与种子中移除。
+
+推荐直接运行幂等脚本（同时清理 `operator_power.powerConfig` 里已授予的 `business` 键；删空保留 `{}` 全禁，不会回退成 NULL 全放行）：
+
+```bash
+cd cemetery-api
+npm run db:remove-business-function
+```
+
+脚本等价于把 `gm_data_000.menu` 中 `gravePlotBusiness` 模板的 `business` 键删掉，并清理各 `operator_power` 行的同名授权键。执行后**重启后端**（启动时加载 `menu.powerConfig` 模板），权限页刷新即不再显示该行；其余功能（销售/下葬/备注/预定/联系人/安葬证）的配置与授权不受影响。
+
+### 20261023：去掉安葬证的“新建”权限（存量库需执行一次）
+
+安葬证设置（`certificate`）只有一个“确认提交”，首次设置与后续修改共用同一次保存，权限页不再提供“新建”勾选，模板只保留 `modify`；首次保存由后端 `gravePlotBusiness-save/update` 在 `idCert=0` 时回落到插入，前端也统一提交到修改入口。
+
+```bash
+cd cemetery-api
+npm run db:remove-certificate-create
+```
+
+脚本幂等：从 `menu.powerConfig.gravePlotBusiness.certificate` 中过滤掉 `create`，并清理各 `operator_power.powerConfig` 已授予的 `certificate.create`（`certificate` 动作因此变空时删除该功能键，整体删空保留 `{}` 全禁）。执行后**重启后端**，权限页刷新即只剩安葬证的“修改”勾选。
+
 建库行为说明：业务库由 `account-save/createDataBase` 从模板库动态对齐创建（`information_schema` 读取表/视图，业务表 `CREATE TABLE ... LIKE`，全局表不复制）；同名库已存在时返回 409 拒绝重建，不再执行 `DROP DATABASE`。
 
 ## 启动项目

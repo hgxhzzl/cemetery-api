@@ -6,15 +6,9 @@ const rbac = require('../rbac');
 const loginState = require('../loginState');
 module.exports = router;
 
-const allowedPowerFields = new Set([
-  'useMenu',
-  'useCreate',
-  'useModify',
-  'useDelete',
-  'useExamine',
-  'useFinish',
-  'usePower',
-]);
+// 菜单总开关(useMenu)单字段翻转白名单:旧的 useCreate/useModify/useDelete/useExamine/useFinish/usePower
+// 布尔列已迁移到功能权限矩阵(powerConfig 白名单,经 /operatorPower-save/config 整块写入),此处不再受理 20261023,
+const allowedPowerFields = new Set(['useMenu']);
 
 // 修改操作员的可写列白名单:只收业务字段,body 里其余字段一律不落库 20261021 审查修复 中F,
 // (table/operator/idfield/idvalue 是语句构造元信息,不在此列但也不能被剔除)

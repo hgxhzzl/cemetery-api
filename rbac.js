@@ -1,6 +1,7 @@
 // 统一授权守卫:平台管理员判定、全局管理接口授权、RBAC 菜单动作校验 20260917 越权收口,
 const pool = require('./database');
 const public = require('./public');
+const permissionTemplate = require('./lib/permissionTemplate');
 
 // 平台管理员:gm_data_000 租户的账户(isAccount=1);旧 token 无 isAccount 字段时安全默认非管理员,
 function isPlatformAdmin(req) {
@@ -74,6 +75,114 @@ async function queryMenuPowerHitCached(userId, values, byMenuName) {
 function invalidateAuthCaches() {
   powerCache.clear();
   regionScopeCache.clear();
+  powerConfigCache.clear();
+}
+
+// 功能级权限白名单缓存(20261023 功能级权限改造新增):
+// 按 userId + 菜单 name 缓存该操作员在该菜单下的 operator_power 行(useMenu 命中与 powerConfig 一并取出),
+// 与 powerCache 同 TTL/同失效口径;一次页面加载并行打多个墓位业务写接口时只查一次库。
+const powerConfigCache = new Map();
+
+// powerConfig 兼容三种落库形态:mysql2 对 json 列可能直接回对象、回字符串,或列为 NULL/未定义。
+// 统一归一为对象;NULL/未配置返回 null(触发"不限功能"回退),解析异常同样按 null 回退并告警,
+// (回退方向与存量行 NULL 的旧行为一致,不会因一次脏数据把合法操作员锁死) 20261023 新增,
+function parsePowerConfig(raw) {
+  if (raw === null || raw === undefined || raw === '') {
+    return null;
+  }
+  if (typeof raw === 'object') {
+    return raw;
+  }
+  try {
+    return JSON.parse(String(raw));
+  } catch (error) {
+    console.warn('[rbac] powerConfig 解析失败,按不限功能回退:', error.message);
+    return null;
+  }
+}
+
+// 取操作员在某菜单下的权限行(经菜单 name 关联);命中 useMenu=1 才有 row,
+// row 为 null 表示无菜单权限;row.powerConfig 为解析后的授权白名单对象或 null,
+// row.menuTemplate 为该菜单 menu.powerConfig 解析出的功能模板(菜单未纳入功能级管控时为 null) 20261023 新增/改造,
+async function fetchMenuPowerRowCached(userId, menuName) {
+  const key = `${userId}:${menuName}`;
+  const cached = powerConfigCache.get(key);
+  if (cached && Date.now() - cached.at < POWER_CACHE_TTL_MS) {
+    return cached.row;
+  }
+  const sql =
+    'SELECT a.powerConfig AS powerConfig, m.powerConfig AS menuTemplate FROM gm_data_000.operator_power a ' +
+    'JOIN gm_data_000.operator b ON a.idOperator = b.idOperator AND b.isDeleted = 0 ' +
+    'JOIN gm_data_000.menu m ON m.id = a.idMenu ' +
+    'WHERE a.idOperator = ? AND a.useMenu = 1 AND m.name = ? LIMIT 1';
+  const rows = await pool.query(sql, [userId, menuName]);
+  const row =
+    Array.isArray(rows) && rows.length > 0
+      ? {
+          powerConfig: parsePowerConfig(rows[0].powerConfig),
+          menuTemplate: permissionTemplate.parseTemplate(rows[0].menuTemplate),
+        }
+      : null;
+  powerConfigCache.set(key, { at: Date.now(), row });
+  // 条目数超上限时按插入顺序淘汰最早一半,与 powerCache 同策略,避免大量冷账号长期占用内存,
+  if (powerConfigCache.size > POWER_CACHE_MAX_ENTRIES) {
+    const dropCount = Math.ceil(powerConfigCache.size / 2);
+    for (const cacheKey of powerConfigCache.keys()) {
+      if (dropCount <= 0) break;
+      powerConfigCache.delete(cacheKey);
+      dropCount -= 1;
+    }
+  }
+  return row;
+}
+
+// 白名单判定:cfg 为 null(未配置/回退)一律放行;否则仅当 cfg[fn].actions[action] 显式为 1 才有权,
+// 键缺失/为 0 视为无权(缺省禁止) 20261023 新增,
+function isFunctionActionGranted(cfg, fn, action) {
+  if (cfg === null || cfg === undefined) {
+    return true;
+  }
+  const fnCfg = cfg[fn];
+  if (!fnCfg || !fnCfg.actions) {
+    return false;
+  }
+  return Number(fnCfg.actions[action]) === 1;
+}
+
+// RBAC 功能级守卫:在菜单权限(useMenu=1)之上,再按"功能×动作"白名单收口 20261023 新增,
+// opts.fn 缺省时运行期按该菜单 menu.powerConfig 模板从 req.body/query 的 type 解析;
+// opts.action 由注册表按路由显式声明。
+// 判定顺序:1) 平台管理员放行; 2) 无菜单权限→区分"菜单未配置/无权限"并 403; 3) 按白名单判 fn.action;
+// 区域(数据轴)不在本守卫处理,交由条目上已有的 requireRegionOwnership 把守,
+function requireFunctionPower(menuName, opts) {
+  const options = opts || {};
+  return async function (req, res, next) {
+    if (isPlatformAdmin(req)) {
+      return next();
+    }
+    try {
+      const row = await fetchMenuPowerRowCached(req.data.userId, menuName);
+      if (!row) {
+        if (!(await anyMenuNameConfigured([menuName]))) {
+          console.error('[rbac] 菜单未配置,拒绝访问:', menuName);
+          return public.respondError(res, 403, '无权限:菜单未配置!');
+        }
+        return public.respondError(res, 403, '无权限:当前账号缺少该菜单操作权限!');
+      }
+      const fn = options.fn || permissionTemplate.resolveFunctionFromTemplate(row.menuTemplate, menuName, req);
+      const action = options.action;
+      if (!fn || !action) {
+        // 功能/动作无法确定:不属于本守卫的判定范围(如菜单未纳入功能模板),按菜单权限放行,
+        return next();
+      }
+      if (!isFunctionActionGranted(row.powerConfig, fn, action)) {
+        return public.respondError(res, 403, '无权限:当前账号缺少该功能操作权限!');
+      }
+      return next();
+    } catch (error) {
+      return public.handleQueryError(res, error);
+    }
+  };
 }
 
 // 拒绝路径存在性检查:仅在权限查询未命中时补打一次库,用于区分"菜单未配置"与"有菜单无权限"两种文案,
@@ -161,10 +270,10 @@ function requirePowerByAnyMenuName(...menuNames) {
 // 而前端 Promise.all 一遇失败即静默放弃(详情视图不出现且无任何提示),表现为"点详情没反应"。
 // 口径统一为:调用"详情专用取数路径"时,只要具备任一含详情页功能菜单的 useMenu 即放行,
 // 各页卡片列表(/room /canSale /parkTree /room?park=region= 等)仍按自身菜单严格校验 20261004 修改,
-// 名单已剔除 sale/buried/contacts(菜单 103102/103103/103105 登记页于三轮下线,菜单行本身不再下发,
-// 留在名单里只会变成一个永不命中的死项;详情取数靠墓位业务/墓位设置/各查询页菜单即可命中),
+// 名单已剔除 sale/buried/contacts/reserve(菜单 103102/103103/103105/103104 登记页已下线,菜单行本身不再下发,
+// 留在名单里只会变成一个永不命中的死项;详情取数靠墓位业务/墓位设置/各查询页菜单即可命中) 20261023 剔除 reserve,
 const DETAIL_PAGE_MENUS = [
-  'room', 'reserve', 'adminfee', 'transferOut',
+  'room', 'adminfee', 'transferOut',
   'gravePlotBusiness', 'managementPeriod',
   'roomQuery', 'saleQuery', 'buriedQuery', 'adminfeeQuery', 'contactsQuery', 'transferOutQuery',
 ];
@@ -390,6 +499,9 @@ module.exports = {
   requirePowerByMenuName,
   requirePowerByAnyMenuName,
   requireQueryPowerWithDetail,
+  requireFunctionPower,
+  parsePowerConfig,
+  isFunctionActionGranted,
   DETAIL_AGGREGATE_ROUTES,
   DETAIL_PAGE_MENUS,
   invalidateAuthCaches,

@@ -28,8 +28,10 @@ router.get('/get-by-room', async (req, res) => {
     // 下葬形态:查 buried 表全部活动记录(倒序,前端取最新一条回填),主键别名 idBusiness 20260923 新增,
     sql = `SELECT *, idBuried AS idBusiness FROM ${req.data.dataBase}.buried WHERE idRoom = ? AND isDeleted = 0 ORDER BY idBuried DESC`;
   } else if (type === 'reserve') {
-    sql = `SELECT idReserve AS idBusiness, idRoom, liaison AS payer, liaisonPhone AS payerPhone, remark, createDate
-      FROM ${req.data.dataBase}.reserve WHERE idRoom = ? AND isDeleted = 0`;
+    // 预定形态:联系人/电话映射为 payer/payerPhone,并带出预定限期供修改回填(旧独立预定页下线后由本页承接) 20261023 调整,
+    sql = `SELECT idReserve AS idBusiness, idRoom, liaison AS payer, liaisonPhone AS payerPhone,
+        reservationExpireDate, remark, createDate
+      FROM ${req.data.dataBase}.reserve WHERE idRoom = ? AND isDeleted = 0 ORDER BY idReserve DESC`;
   } else if (type === 'certificate') {
     // 安葬证设置形态:查 burial_cert 表活动记录(倒序,前端取最新一条回填),主键别名 idBusiness 20260927 新增,
     sql = `SELECT *, idCert AS idBusiness FROM ${req.data.dataBase}.burial_cert WHERE idRoom = ? AND isDeleted = 0 ORDER BY idCert DESC`;

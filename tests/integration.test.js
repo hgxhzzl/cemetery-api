@@ -282,6 +282,29 @@ test('gravePlotBusiness/cancelSale: 作废销售逐表软删业务记录 + 墓�
   }
 });
 
+// 销售删除(原取消销售)的权限动作已统一为 sale.delete 并只挂在取消销售接口;
+// 通用删除接口遇到 type=sale 必须 400 且不发任何写库语句,避免持该动作的调用者走默认分支误删业务记录 20261023 新增,
+test('gravePlotBusiness/delete: type=sale 拒绝走通用删除,且不发出写库语句', async () => {
+  const mockPool = createMockPool([]);
+  database.setPoolForTesting(mockPool);
+
+  const gravePlotBusinessDelete = require('../gravePlotBusiness/delete');
+  const { server, base } = startServer(gravePlotBusinessDelete, '/api/gravePlotBusiness-delete');
+  try {
+    const response = await fetch(`${base}/api/gravePlotBusiness-delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idRoom: 1000001, type: 'sale' }),
+    });
+    assert.strictEqual(response.status, 400);
+    const body = await response.json();
+    assert.match(body.error, /取消销售接口/);
+    assert.strictEqual(mockPool.calls.length, 0, '拒绝 type=sale 时不得发出任何写库语句');
+  } finally {
+    server.close();
+  }
+});
+
 test('gravePlotBusiness/save insert(buried): 下葬 + 锚定日期 + 墓位置已下葬 + deceased聚合 + 联系人新增 + contacts聚合,同一事务', async () => {
   // 原 /api/buried-save(墓区下葬登记页)已于三轮下线,单条下葬记录的写唯一入口是墓位业务的下葬形态;
   // 联系人匹配查询返回空 → 走"名/电话均不存在则新增"分支,
@@ -480,23 +503,25 @@ test('login: 存量 bcrypt 口令登录成功后升级为 scrypt(基于提交的
   }
 });
 
-test('reserve/save insert: 预定记录 + 墓位置已预定(销售状态不动),同一事务', async () => {
+// 墓位业务页「预定期」入口承接原独立预定页的新建口径(旧 /api/reserve-save 已于 20261023 下线),
+// 预定记录 + 墓位置为已预定(销售状态不动) + 限期副本同步仍在同一事务,
+test('gravePlotBusiness/save insert(reserve): 新建预定记录 + 墓位置为已预定(销售状态不动) + 限期副本同步,同一事务', async () => {
   const mockPool = createMockPool([]);
   database.setPoolForTesting(mockPool);
 
-  const reserveSave = require('../reserve/save');
-  const { server, base } = startServer(reserveSave, '/api/reserve-save');
+  const businessSave = require('../gravePlotBusiness/save');
+  const { server, base } = startServer(businessSave, '/api/gravePlotBusiness-save');
   try {
-    const response = await fetch(`${base}/api/reserve-save/insert`, {
+    const response = await fetch(`${base}/api/gravePlotBusiness-save/insert`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         idRoom: '1000001',
-        reserveDate: '2026-09-17',
+        type: 'reserve',
+        payer: '王五',
+        payerPhone: '13900139000',
         // 预定限期为必填(20261011 新增),缺失会被 400 拦下
         reservationExpireDate: '2026-12-31',
-        contacts: '王五',
-        contactsphone: '13900139000',
       }),
     });
     assert.strictEqual(response.status, 200);
@@ -529,54 +554,8 @@ test('reserve/save insert: 预定记录 + 墓位置已预定(销售状态不动)
   }
 });
 
-// 一穴一条预定记录:同一墓位反复预定(含取消后重新预定)不得累积多条,否则预定人/限期取值全靠运气 20261011 新增
-test('reserve/save insert: 该墓位已有预定记录时复用原行而不新增第二条', async () => {
-  // 查现存记录的 SELECT 与后续语句共用 mock 返回行→命中"已有记录"分支 20261011 新增,
-  const mockPool = createMockPool([{ idReserve: 2000009 }]);
-  database.setPoolForTesting(mockPool);
-
-  const reserveSave = require('../reserve/save');
-  const { server, base } = startServer(reserveSave, '/api/reserve-save');
-  try {
-    const response = await fetch(`${base}/api/reserve-save/insert`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        idRoom: '1000001',
-        liaison: '王五',
-        liaisonPhone: '13900139000',
-        reservationExpireDate: '2026-12-31',
-        remark: '重新预定',
-      }),
-    });
-    assert.strictEqual(response.status, 200);
-
-    const calls = mockPool.calls;
-    const sqls = calls.map((call) => call.sql);
-    // 1. 不再发出 reserve 插入语句 20261011 新增,
-    assert.ok(!sqls.some((sql) => sql.includes('insert into gm_data_001.reserve')));
-    // 2. 复用原行按 idReserve 更新,限期写入且 isDeleted 回置 0;idRoom 不进 SET 子句 20261011 新增,
-    const reserveUpdate = calls.find(
-      (call) => call.sql.includes('gm_data_001.reserve set') && call.sql.includes('where idReserve = ?'),
-    );
-    assert.ok(reserveUpdate);
-    assert.ok(!reserveUpdate.sql.split(' where ')[0].includes('idRoom ='));
-    assert.ok(reserveUpdate.params.includes(2000009));
-    assert.ok(reserveUpdate.params.includes('2026-12-31'));
-    assert.ok(reserveUpdate.params.includes(0));
-    // 3. 同穴其余活动记录软删收敛 20261011 新增,
-    assert.ok(
-      sqls.some((sql) => sql.includes('gm_data_001.reserve set isDeleted = 1 where idRoom = ? and idReserve <> ? and isDeleted = 0')),
-    );
-    // 4. 墓位置预定与限期副本同步仍在同一事务内跟着走 20261011 新增,
-    assert.ok(sqls.some((sql) => sql.includes('gm_data_001.room set')));
-    assert.ok(sqls.some((sql) => sql.includes('set r.reservationExpireDate')));
-  } finally {
-    server.close();
-  }
-});
-
-// 墓区业务页预定入口与预定登记页共用同一辅助函数,两个入口得同样不堆积 20261011 新增
+// 一穴一条预定记录:同一墓位反复预定(含取消后重新预定)不得累积多条,否则预定人/限期取值全靠运气 20261011 新增;
+// 旧 /api/reserve-save 已下线,本用例改为验证墓位业务页入口复用的同一辅助函数 20261023 调整,
 test('gravePlotBusiness/save insert(reserve): 已有预定记录时同样复用原行', async () => {
   const mockPool = createMockPool([{ idReserve: 2000012 }]);
   database.setPoolForTesting(mockPool);
@@ -592,6 +571,7 @@ test('gravePlotBusiness/save insert(reserve): 已有预定记录时同样复用�
         type: 'reserve',
         payer: '张预定',
         payerPhone: '13800138000',
+        reservationExpireDate: '2026-12-31',
         remark: '业务页预定',
       }),
     });
@@ -600,34 +580,46 @@ test('gravePlotBusiness/save insert(reserve): 已有预定记录时同样复用�
     const calls = mockPool.calls;
     const sqls = calls.map((call) => call.sql);
     assert.ok(!sqls.some((sql) => sql.includes('insert into gm_data_001.reserve')));
+    // 1. 复用原行按 idReserve 更新,限期写入且 isDeleted 回置 0;idRoom 不进 SET 子句 20261011 新增,
     const reserveUpdate = calls.find(
       (call) => call.sql.includes('gm_data_001.reserve set') && call.sql.includes('where idReserve = ?'),
     );
     assert.ok(reserveUpdate);
+    assert.ok(!reserveUpdate.sql.split(' where ')[0].includes('idRoom ='));
     assert.ok(reserveUpdate.params.includes(2000012));
-    // 联系人/电话按 liaison/liaisonPhone 列名回落 20261011 新增,
+    assert.ok(reserveUpdate.params.includes('2026-12-31'));
+    assert.ok(reserveUpdate.params.includes(0));
+    // 2. 联系人/电话按 liaison/liaisonPhone 列名回落 20261011 新增,
     assert.ok(reserveUpdate.params.includes('张预定'));
+    // 3. 同穴其余活动记录软删收敛 20261011 新增,
+    assert.ok(
+      sqls.some((sql) => sql.includes('gm_data_001.reserve set isDeleted = 1 where idRoom = ? and idReserve <> ? and isDeleted = 0')),
+    );
+    // 4. 墓位置为已预定与限期副本同步仍在同一事务内跟着走 20261011 新增,
     assert.ok(sqls.some((sql) => sql.includes('gm_data_001.room set')));
+    assert.ok(sqls.some((sql) => sql.includes('set r.reservationExpireDate')));
   } finally {
     server.close();
   }
 });
 
-// 预定限期必填拦截:空值会被 normalizeBodyDates 转成 null,直接落库会报错或写入零值日期 20261011 新增
-test('reserve/save insert: 缺 reservationExpireDate 时 400 且不发出任何写入语句', async () => {
+// 预定限期必填拦截:空值会被 normalizeBodyDates 转成 null,直接落库会报错或写入零值日期 20261011 新增;
+// 旧 /api/reserve-save 下线后同一口径由墓位业务页承接 20261023 调整,
+test('gravePlotBusiness/save insert(reserve): 缺 reservationExpireDate 时 400 且不发出任何写入语句', async () => {
   const mockPool = createMockPool([]);
   database.setPoolForTesting(mockPool);
 
-  const reserveSave = require('../reserve/save');
-  const { server, base } = startServer(reserveSave, '/api/reserve-save');
+  const businessSave = require('../gravePlotBusiness/save');
+  const { server, base } = startServer(businessSave, '/api/gravePlotBusiness-save');
   try {
-    const response = await fetch(`${base}/api/reserve-save/insert`, {
+    const response = await fetch(`${base}/api/gravePlotBusiness-save/insert`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         idRoom: '1000001',
-        liaison: '王五',
-        liaisonPhone: '13900139000',
+        type: 'reserve',
+        payer: '王五',
+        payerPhone: '13900139000',
         reservationExpireDate: '',
       }),
     });
@@ -640,61 +632,23 @@ test('reserve/save insert: 缺 reservationExpireDate 时 400 且不发出任何�
   }
 });
 
-// 预定修改同步墓位限期副本:reserve 改了而 room 没改,墓位侧展示的到期日就是旧值 20261011 新增
-test('reserve/save update: 预定记录更新 + 墓位限期副本同步,同一事务', async () => {
+// 修改预定时调用方漏传 idRoom,限期副本仍得跟着改(旧写法依赖 idRoom,漏传就静默不同步) 20261011 新增;
+// 旧 /api/reserve-save 下线后同一口径由墓位业务页承接 20261023 调整,
+test('gravePlotBusiness/save update(reserve): 不带 idRoom 时仍按 idReserve 反查墓位同步限期副本', async () => {
   const mockPool = createMockPool([]);
   database.setPoolForTesting(mockPool);
 
-  const reserveSave = require('../reserve/save');
-  const { server, base } = startServer(reserveSave, '/api/reserve-save');
+  const businessSave = require('../gravePlotBusiness/save');
+  const { server, base } = startServer(businessSave, '/api/gravePlotBusiness-save');
   try {
-    const response = await fetch(`${base}/api/reserve-save/update`, {
+    const response = await fetch(`${base}/api/gravePlotBusiness-save/update`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        idReserve: '2000001',
-        idRoom: '1000001',
-        liaison: '王五',
-        liaisonPhone: '13900139000',
-        reservationExpireDate: '2027-01-31',
-      }),
-    });
-    assert.strictEqual(response.status, 200);
-
-    const calls = mockPool.calls;
-    const sqls = calls.map((call) => call.sql);
-    // 1. 预定记录按 idReserve 更新,限期入 SET 子句,而 idRoom 仅作同步靶子不得回落为更新列 20261011 新增,
-    const reserveUpdate = calls.find((call) => call.sql.includes('gm_data_001.reserve set'));
-    assert.ok(reserveUpdate);
-    assert.ok(reserveUpdate.sql.includes('reservationExpireDate = ?'));
-    assert.ok(!reserveUpdate.sql.includes('idRoom = ?'));
-    assert.ok(reserveUpdate.params.includes('2027-01-31'));
-    // 2. 限期副本同步语句排在预定更新之后(同事务内才能读到新值) 20261011 新增,
-    const syncIndex = sqls.findIndex((sql) => sql.includes('set r.reservationExpireDate'));
-    assert.ok(syncIndex > -1);
-    assert.ok(syncIndex > sqls.indexOf(reserveUpdate.sql));
-    assert.ok(sqls[syncIndex].includes('gm_data_001.reserve'));
-    // 3. 按 idReserve 反查所属墓位,不拿调用方的 idRoom 当条件 20261011 新增,
-    assert.ok(sqls[syncIndex].includes('res2.idReserve = 2000001'));
-  } finally {
-    server.close();
-  }
-});
-
-// 修改预定时调用方漏传 idRoom,限期副本仍得跟着改(旧写法依赖 idRoom,漏传就静默不同步) 20261011 新增
-test('reserve/save update: 不带 idRoom 时仍按 idReserve 反查墓位同步限期副本', async () => {
-  const mockPool = createMockPool([]);
-  database.setPoolForTesting(mockPool);
-
-  const reserveSave = require('../reserve/save');
-  const { server, base } = startServer(reserveSave, '/api/reserve-save');
-  try {
-    const response = await fetch(`${base}/api/reserve-save/update`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        idReserve: '2000001',
-        liaison: '王五',
+        idBusiness: '2000001',
+        type: 'reserve',
+        payer: '王五',
+        payerPhone: '13900139000',
         reservationExpireDate: '2027-03-31',
       }),
     });
@@ -710,7 +664,8 @@ test('reserve/save update: 不带 idRoom 时仍按 idReserve 反查墓位同步�
   }
 });
 
-// 墓区业务页预定修改与预定登记页同一口径:改期必同步墓位副本 20261011 新增
+// 墓区业务页预定修改与旧预定登记页同一口径:改期必同步墓位副本 20261011 新增;
+// 旧 /api/reserve-save 已下线,本用例成为唯一的修改口径断言 20261023 调整,
 test('gravePlotBusiness/save update(reserve): 预定记录更新 + 墓位限期副本同步,同一事务', async () => {
   const mockPool = createMockPool([]);
   database.setPoolForTesting(mockPool);
@@ -734,31 +689,39 @@ test('gravePlotBusiness/save update(reserve): 预定记录更新 + 墓位限期�
 
     const calls = mockPool.calls;
     const sqls = calls.map((call) => call.sql);
+    // 1. 预定记录按 idReserve 更新,限期入 SET 子句,而 idRoom 仅作同步靶子不得回落为更新列 20261011 新增,
     const reserveUpdate = calls.find(
       (call) => call.sql.includes('gm_data_001.reserve set') && call.sql.includes('where idReserve = ?'),
     );
     assert.ok(reserveUpdate);
+    assert.ok(reserveUpdate.sql.includes('reservationExpireDate = ?'));
+    assert.ok(!reserveUpdate.sql.includes('idRoom = ?'));
     assert.ok(reserveUpdate.params.includes('2027-06-30'));
+    // 2. 限期副本同步语句排在预定更新之后(同事务内才能读到新值) 20261011 新增,
     const syncIndex = sqls.findIndex((sql) => sql.includes('set r.reservationExpireDate'));
+    assert.ok(syncIndex > -1);
     assert.ok(syncIndex > sqls.indexOf(reserveUpdate.sql));
+    assert.ok(sqls[syncIndex].includes('gm_data_001.reserve'));
+    // 3. 按 idReserve 反查所属墓位,不拿调用方的 idRoom 当条件 20261011 新增,
     assert.ok(sqls[syncIndex].includes('res2.idReserve = 2000015'));
   } finally {
     server.close();
   }
 });
 
-// 取消预定后墓位限期必须清空:否则墓位仍显示一个已失效的到期日 20261011 新增
-test('reserve/delete: 软删预定 + 墓位只回置未预定(销售状态不动) + 限期副本清空,同一事务', async () => {
+// 取消预定后墓位限期必须清空:否则墓位仍显示一个已失效的到期日 20261011 新增;
+// 旧 /api/reserve-delete 下线后由墓位业务删除接口的 type=reserve 分支承接 20261023 调整,
+test('gravePlotBusiness/delete type=reserve: 软删预定 + 墓位只回置未预定(销售状态不动) + 限期副本清空,同一事务', async () => {
   const mockPool = createMockPool([]);
   database.setPoolForTesting(mockPool);
 
-  const reserveDelete = require('../reserve/delete');
-  const { server, base } = startServer(reserveDelete, '/api/reserve-delete');
+  const businessDelete = require('../gravePlotBusiness/delete');
+  const { server, base } = startServer(businessDelete, '/api/gravePlotBusiness-delete');
   try {
-    const response = await fetch(`${base}/api/reserve-delete`, {
+    const response = await fetch(`${base}/api/gravePlotBusiness-delete`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ idRoom: 1000001 }),
+      body: JSON.stringify({ idRoom: 1000001, type: 'reserve' }),
     });
     assert.strictEqual(response.status, 200);
 
@@ -775,6 +738,41 @@ test('reserve/delete: 软删预定 + 墓位只回置未预定(销售状态不动
     const roomExpireSync = sqls.find((sql) => sql.includes('set r.reservationExpireDate'));
     assert.ok(roomExpireSync);
     assert.ok(roomExpireSync.includes('res.isDeleted = 0'));
+  } finally {
+    server.close();
+  }
+});
+
+// 安葬证设置只有一个“确认提交”，权限页已去掉 certificate.create：首次保存（idCert=0）也走 update 入口，
+// 后端在该分支回落到插入 burial_cert，使仅具 certificate.modify 的账号不被 create 守卫 403 20261023 新增,
+test('gravePlotBusiness/save update(certificate): idBusiness=0 首次保存回落到插入 burial_cert', async () => {
+  const mockPool = createMockPool([]);
+  database.setPoolForTesting(mockPool);
+
+  const businessSave = require('../gravePlotBusiness/save');
+  const { server, base } = startServer(businessSave, '/api/gravePlotBusiness-save');
+  try {
+    const response = await fetch(`${base}/api/gravePlotBusiness-save/update`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        idBusiness: 0,
+        idRoom: 1000001,
+        type: 'certificate',
+        certHolder: '李持证',
+        certHolderPhone: '13800138000',
+        deceasedA: '安葬者',
+      }),
+    });
+    assert.strictEqual(response.status, 200);
+
+    const calls = mockPool.calls;
+    const insertCall = calls.find((call) => call.sql.includes('insert into gm_data_001.burial_cert'));
+    assert.ok(insertCall, '首次保存应回落到插入 burial_cert');
+    assert.ok(!calls.some((call) => call.sql.includes('burial_cert set')), '首次保存不应发 UPDATE');
+    assert.ok(insertCall.params.includes('李持证'));
+    assert.ok(insertCall.params.includes(1000001), '插入需保留 idRoom');
+    assert.ok(!insertCall.sql.includes('idBusiness'), 'idBusiness 不得作为列写入');
   } finally {
     server.close();
   }

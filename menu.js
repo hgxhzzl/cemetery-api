@@ -163,9 +163,10 @@ router.get('/', async (req, res) => {
         const menuTree = buildMenuTreeFromRows(menuRows);
         // 非平台账户不下发「用户管理」子树(三轮 P1-1 的菜单侧兜底,口径与接口侧 platformOnly 取同一个 rbac 判据),
         const visibleMenuTree = filterPlatformOnlyMenus(menuTree, rbac.isPlatformAdmin(req));
-        // 墓位业务：7 个页面菜单按区域重组为"区域二级 + 页面三级"结构 20260923 修改,
+        // 墓位业务：5 个页面菜单按区域重组为"区域二级 + 页面三级"结构 20260923 修改,
         // 管理费用收款/管理期限维护 20260925 自收费管理迁入墓位管理(菜单 id 103108/103109),一并挂到各区域下,
         // 销售/下葬/联系人三个登记页菜单(103102/103103/103105)已于三轮下线,不再参与区域重组,
+        // 预定登记页菜单(103104)已于 20261023 下线(预定入口并入墓位业务),同样不再参与区域重组,
         // 区域二级菜单按当前操作员 operator.region 收窄,未配置区域(及平台管理员)时不做过滤;
         // 区域取数已上收到 rbac,与区域下拉同源 20261010 修改,
         // 本接口单独保留降级:取数失败时按“不过滤”渲染菜单树。菜单层级只是导航展示,
@@ -177,7 +178,7 @@ router.get('/', async (req, res) => {
         } catch (regionError) {
             console.warn('fetchOperatorRegions failed(菜单降级为不过滤):', req.data.userId, regionError.message);
         }
-        await rebuildRegionMenus(visibleMenuTree, req.data.dataBase, 'operate', ['gravePlotBusiness', 'reserve', 'transferOut', 'room', 'adminfee', 'managementPeriod'], operatorRegions);
+        await rebuildRegionMenus(visibleMenuTree, req.data.dataBase, 'operate', ['gravePlotBusiness', 'transferOut', 'room', 'adminfee', 'managementPeriod'], operatorRegions);
         return public.respondList(res, visibleMenuTree);
     } catch (error) {
         return public.handleQueryError(res, error);

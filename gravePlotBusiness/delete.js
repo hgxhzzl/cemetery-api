@@ -5,11 +5,23 @@ const public = require('../public');
 module.exports = router;
 
 // 删除墓位业务:业务形态仅软删本业务表记录,不回置墓位销售状态(与墓位销售完全独立) 20260923 新增,
+// 预定形态(type=reserve):软删该墓位活动预定记录并回置未预定、清空限期副本(旧独立预定页下线后由本页承接) 20261023 调整,
 // 下葬形态(type=buried):软删选中的下葬记录(按 idBuried),联动逻辑完整复制下葬页但代码独立 20260923 新增,
 router.post('/', async (req, res) => {
   const idRoom = public.parseNumericParam(public.readParam(req, 'idRoom'));
   if (idRoom === null) {
     return res.status(400).json({ error: 'idRoom参数错误!' });
+  }
+
+  // 销售删除与取消销售是同一功能:权限动作统一为 sale.delete,且只挂在取消销售接口;
+  // 本接口遇到 type=sale 必须拒绝,否则持该动作的调用者会走下方默认分支误删业务记录 20261023 调整,
+  if (public.readParam(req, 'type') === 'sale') {
+    return public.respondError(res, 400, '销售删除请使用取消销售接口!');
+  }
+
+  // 预定形态(type=reserve):软删活动预定记录,墓位只回置未预定、销售状态不动(逻辑同旧预定删除接口) 20261023 新增,
+  if (public.readParam(req, 'type') === 'reserve') {
+    return deleteReserveRecord(req, res, idRoom);
   }
 
   // 下葬形态：删除单条下葬记录（参数与逻辑同下葬页删除接口，代码独立不复用 buried 模块路由）
@@ -44,6 +56,33 @@ router.post('/', async (req, res) => {
   const sql = public.getSoftDeleteByConditionStatement(json);
   return public.Transaction([sql], res);
 });
+
+// 删除预定记录:软删该墓位活动预定,并把墓位预定状态回置为未预定、清空预定限期副本,事务保证多表一致 20261023 新增,
+// 销售状态一律不动:预定登记不动销售状态,取消自然也不动(否则会误把已销售墓位置成未销售),
+function deleteReserveRecord(req, res, idRoom) {
+  const reserveJson = {
+    table: req.data.dataBase + '.reserve',
+    condition: { sql: 'idRoom = ? AND isDeleted = 0', params: [idRoom] },
+    isDeleted: 1,
+    operator: req.data.userName,
+  };
+  const sqlReserve = public.getSoftDeleteByConditionStatement(reserveJson);
+
+  // 墓位状态回置:只回预定状态,与置已预定互为逆操作 20261011 修正,
+  const roomJson = {
+    table: req.data.dataBase + '.room',
+    operator: req.data.userName,
+    idfield: 'idRoom',
+    idvalue: idRoom,
+    reserveStatus: 'statusType.reserveStatusEnum.unreserved',
+  };
+  const sqlRoom = public.getUpdateByIdStatement(roomJson);
+
+  // 限期副本随预定一同清空:软删后已无活动预定记录,同步语句自然回 NULL 20261011 新增,
+  const sqlReservationSync = public.getRoomReservationExpireSyncSql(req.data.dataBase, idRoom);
+
+  return public.Transaction([sqlReserve, sqlRoom, sqlReservationSync], res);
+}
 
 // 删除下葬记录:软删选中记录(按 idBuried);若该墓位已无其他活动下葬记录,
 // 则把墓位下葬状态回置为未下葬并清空管理费起止日期,事务保证多表一致 20260923 新增,

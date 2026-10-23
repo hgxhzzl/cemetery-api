@@ -10,6 +10,14 @@ const bodyParser = require('body-parser');
 const database = require('../database');
 const rbac = require('../rbac');
 const routeRegistry = require('../routeRegistry');
+const permissionTemplate = require('../lib/permissionTemplate');
+const { MENU_POWER_TEMPLATES } = require('../scripts/add-menu-power-config');
+
+// 注册表体检需要 menu.powerConfig 功能模板才能校验 functionPower 的 menu/fn/action;
+// 测试不连库,注入与升级脚本同源的模板(生产由 index.js 启动时从库加载)20261023 改造,
+test.before(() => {
+  permissionTemplate.setTemplates(MENU_POWER_TEMPLATES);
+});
 
 // 空行集 mock 池:权限命中查询与菜单存在性检查都返回空,即“当前操作员没有任何菜单权限”,
 // 守卫应在业务 handler 之前结束请求,因此本用例不需要各业务表的 mock 数据,
@@ -39,7 +47,9 @@ function collectMountedEndpoints(routes = routeRegistry.ROUTES) {
         fullPath,
         methods: route.methods,
         isWrite: routeRegistry.isWriteMethod(route.methods),
-        hasPermissionGuard: covered.some((guard) => Boolean(guard.menu || guard.anyMenu || guard.platformOnly)),
+        hasPermissionGuard: covered.some((guard) =>
+          Boolean(guard.menu || guard.anyMenu || guard.platformOnly || guard.functionPower),
+        ),
       });
     }
   }
@@ -61,6 +71,18 @@ test('routeRegistry: 注册表体检零违规(每个接口都已登记守卫口�
   assert.ok(routeRegistry.ROUTES.length >= 50, `注册表条目数异常(${routeRegistry.ROUTES.length}),疑似被误删`);
   const endpoints = collectMountedEndpoints();
   assert.ok(endpoints.filter((item) => item.isWrite).length >= 30, '写接口样本数量过低,遍历断言已退化');
+});
+
+// 销售删除(原取消销售)按功能矩阵开放到具体操作员:不得再回退到 platformOnly(等同 isAccount===1),
+// 但区域归属守卫必须保留,避免“有 sale.delete 就能跨区域删” 20261023 新增,
+test('routeRegistry: 销售删除按 sale.delete 授权且保留区域归属', () => {
+  const entry = routeRegistry.ROUTES.find((item) => item.path === '/api/gravePlotBusiness-cancelSale');
+  assert.ok(entry, '注册表缺少销售删除条目');
+  const guard = (entry.guards || []).find((item) => !item.at);
+  assert.ok(guard, '销售删除缺少整前缀守卫');
+  assert.strictEqual(guard.platformOnly, undefined, '销售删除不应再声明仅平台管理员');
+  assert.deepStrictEqual(guard.functionPower, { menu: 'gravePlotBusiness', fn: 'sale', action: 'delete' });
+  assert.ok(guard.ownership, '销售删除仍应保留区域归属守卫');
 });
 
 // 遍历全表断言“每个已挂载写接口都要求权限”:以无任何菜单权限的操作员身份逐条请求,
@@ -172,6 +194,108 @@ test('routeRegistry: 漏写守卫或口径冲突时体检必须报错', () => {
   assert.ok(
     violations.some((line) => line.includes('/api/room-query/idList') && line.includes('没有对应的 GET 路由')),
     '白名单登了不存在的路径未被捕获',
+  );
+});
+
+// functionPower 口径校验(20261023 功能级权限改造):墓位业务写接口强制走功能级权限,functionPower 声明必须合法,
+// 与 menu 重复、菜单未纳入 menu.powerConfig 模板、非法 fn/action 都必须在启动体检时报错,
+test('routeRegistry: functionPower 口径校验(墓位业务写接口强制走功能级权限)', () => {
+  const expressRouter = require('express').Router;
+  const saveRouter = expressRouter();
+  saveRouter.post('/insert', (req, res) => res.status(200).json({ code: 0 }));
+
+  const graveMenuOnly = {
+    path: '/api/gravePlotBusiness-save',
+    router: saveRouter,
+    note: '墓位业务写接口漏功能级权限',
+    guards: [{ at: '/insert', menu: 'gravePlotBusiness' }],
+  };
+  const redundant = {
+    path: '/api/fake-redundant',
+    router: expressRouter(),
+    note: 'functionPower 与 menu 冗余',
+    guards: [{ at: '', menu: 'gravePlotBusiness', functionPower: { menu: 'gravePlotBusiness', action: 'create' } }],
+  };
+  const badMenu = {
+    path: '/api/fake-badmenu',
+    router: expressRouter(),
+    note: '菜单未纳入功能级管控',
+    guards: [{ at: '', functionPower: { menu: 'notInCatalog', action: 'create' } }],
+  };
+  const badAction = {
+    path: '/api/fake-badaction',
+    router: expressRouter(),
+    note: '动作非法',
+    guards: [{ at: '', functionPower: { menu: 'gravePlotBusiness', fn: 'sale', action: 'fly' } }],
+  };
+
+  const violations = routeRegistry.auditRouteRegistry([graveMenuOnly, redundant, badMenu, badAction]);
+  assert.ok(
+    violations.some((line) => line.includes('/api/gravePlotBusiness-save/insert') && line.includes('functionPower')),
+    '墓位业务写接口漏 functionPower 未被捕获',
+  );
+  assert.ok(
+    violations.some((line) => line.includes('/api/fake-redundant') && line.includes('不得再声明 menu')),
+    'functionPower 与 menu 冗余未被捕获',
+  );
+  assert.ok(
+    violations.some((line) => line.includes('/api/fake-badmenu') && line.includes('未纳入功能级管控')),
+    '非法 menu 未被捕获',
+  );
+  assert.ok(
+    violations.some((line) => line.includes('/api/fake-badaction') && line.includes("不属于 'gravePlotBusiness.sale'")),
+    '非法 fn/action 未被捕获',
+  );
+
+  // 正向:合规的 functionPower 声明(action 由路由声明、fn 运行期解析)不报错,
+  const ok = {
+    path: '/api/gravePlotBusiness-save',
+    router: saveRouter,
+    note: '墓位业务写接口合规',
+    guards: [{ at: '/insert', functionPower: { menu: 'gravePlotBusiness', action: 'create' }, ownership: { table: 'room', idParam: 'idRoom' } }],
+  };
+  const okViolations = routeRegistry.auditRouteRegistry([ok]);
+  assert.deepStrictEqual(okViolations, [], `合规声明不应报错:${okViolations.join(' | ')}`);
+});
+
+// 动作列迁移(20261023):写接口强制 functionPower 的审计口径已从仅 gravePlotBusiness 泛化到所有功能模板非空的菜单,
+// 单功能菜单(transferOut/reserve/... 等)的写接口漏 functionPower 必须被捕获,合规声明不得报错,
+test('routeRegistry: 单功能菜单写接口漏 functionPower 被泛化审计捕获', () => {
+  const expressRouter = require('express').Router;
+  const saveRouter = expressRouter();
+  saveRouter.post('/insert', (req, res) => res.status(200).json({ code: 0 }));
+
+  const menuOnly = {
+    path: '/api/transferOut-save',
+    router: saveRouter,
+    note: '迁出写接口仍用 menu(漏功能级权限)',
+    guards: [{ at: '/insert', menu: 'transferOut' }],
+  };
+  const menuOnlyViolations = routeRegistry.auditRouteRegistry([menuOnly]);
+  assert.ok(
+    menuOnlyViolations.some((line) => line.includes('/api/transferOut-save/insert') && line.includes('functionPower')),
+    '单功能菜单写接口漏 functionPower 未被泛化审计捕获',
+  );
+
+  const fpOk = {
+    path: '/api/transferOut-save',
+    router: saveRouter,
+    note: '迁出写接口合规(单功能菜单 fn=菜单名)',
+    guards: [{ at: '/insert', functionPower: { menu: 'transferOut', action: 'create' } }],
+  };
+  assert.deepStrictEqual(routeRegistry.auditRouteRegistry([fpOk]), [], '合规的单功能菜单 functionPower 不应报错');
+
+  // room 仅 create:声明 modify 动作属非法 action,应在单项守卫校验时报错,
+  const roomBadAction = {
+    path: '/api/room-save',
+    router: expressRouter(),
+    note: 'room 仅开放 create',
+    guards: [{ at: '/insert', functionPower: { menu: 'room', fn: 'room', action: 'modify' } }],
+  };
+  const roomViolations = routeRegistry.auditRouteRegistry([roomBadAction]);
+  assert.ok(
+    roomViolations.some((line) => line.includes('/api/room-save/insert')),
+    'room 非法动作(modify)未被捕获',
   );
 });
 
@@ -294,9 +418,10 @@ test('routeRegistry: 全局共享表条目漏收权限或误挂归属时报错',
   assert.strictEqual(violations.length, 2, `应只报出 2 处问题,实际:${violations.join(' | ')}`);
 });
 
-// 登记页下线的防回潮约束(审查修复 20261021 三轮 P1-3):销售/下葬/联系人三个登记页接口已从注册表摘除,
-// 写操作唯一入口是 gravePlotBusiness;若有人把它们加回来,等于重新打开一条无预定闸门/不派生下葬记录的旁路,
-// 因此这里钉住三层:条目不存在、任何守卫不再引用这三个已下线的菜单名、详情放行菜单全集里不含它们,
+// 登记页下线的防回潮约束(审查修复 20261021 三轮 P1-3;20261023 追加预定):
+// 销售/下葬/联系人/预定四个登记页接口已从注册表摘除,写操作唯一入口是 gravePlotBusiness;
+// 若有人把它们加回来,等于重新打开一条无预定闸门/不派生下葬记录的旁路,
+// 因此这里钉住三层:条目不存在、任何守卫不再引用这些已下线的菜单名、详情放行菜单全集里不含它们,
 test('routeRegistry: 已下线的登记页接口不得重新回到注册表', () => {
   const OFFLINE_PREFIXES = [
     '/api/sale-save',
@@ -305,8 +430,10 @@ test('routeRegistry: 已下线的登记页接口不得重新回到注册表', ()
     '/api/buried-delete',
     '/api/contacts-save',
     '/api/contacts-delete',
+    '/api/reserve-save',
+    '/api/reserve-delete',
   ];
-  const OFFLINE_MENUS = ['sale', 'buried', 'contacts'];
+  const OFFLINE_MENUS = ['sale', 'buried', 'contacts', 'reserve'];
 
   OFFLINE_PREFIXES.forEach((path) => {
     assert.ok(!routeRegistry.ROUTES.some((entry) => entry.path === path), `${path} 已随登记页下线,不应再挂载`);
@@ -359,13 +486,13 @@ test('routeRegistry: 同一条目内守卫挂载顺序先于业务路由', () =>
   );
 });
 
-// 三轮 P1-2 共用口径:四个业务写入口与它们的目标墓位归属作用域(两个用例分别验单区/多区),
+// 三轮 P1-2 共用口径:业务写入口与它们的目标墓位归属作用域(两个用例分别验单区/多区),
+// 预定登记页 103104 已下线,reserve 写入口随之摘除,不再列入本表 20261023 调整,
 const ownRoomScope = { table: 'room', idParam: 'idRoom' };
 const BUSINESS_INSERT = [
   { path: '/api/gravePlotBusiness-save', menu: 'gravePlotBusiness' },
   { path: '/api/transferOut-save', menu: 'transferOut' },
   { path: '/api/adminfee-save', menu: 'adminfee' },
-  { path: '/api/reserve-save', menu: 'reserve' },
 ];
 const findEntry = (path) => routeRegistry.ROUTES.find((item) => item.path === path);
 
@@ -374,11 +501,13 @@ const findEntry = (path) => routeRegistry.ROUTES.find((item) => item.path === pa
 // (墓位列表按 region 等值 + 园区/区域下拉 filterByOperatorRegions + 显式 region 参数由 requireRegionScope 拦下),
 // 所以这道闸只为“绕过界面直调接口”兜底,正常操作零行为变化;两层都钉住:声明层与真实请求层,
 test('routeRegistry: 业务新建接口按目标墓位区域收窄(跨区新建 403,本区新建不误伤)', async () => {
-  // 1) 声明层:四个业务前缀的 /insert 都必须挂 ownRoomScope——新记录无主键可查,归属只能按目标墓位判定,
+  // 1) 声明层:每个业务前缀的 /insert 都必须挂 ownRoomScope——新记录无主键可查,归属只能按目标墓位判定,
   BUSINESS_INSERT.forEach(({ path, menu }) => {
     const insertGuard = (findEntry(path).guards || []).find((guard) => guard.at === '/insert');
     assert.ok(insertGuard, `${path} 缺少 /insert 守卫`);
-    assert.strictEqual(insertGuard.menu, menu, `${path}/insert 菜单口径不符`);
+    // 菜单口径:粗粒度 menu 或功能级 functionPower.menu 均算命中(墓位业务已转 functionPower) 20261023 新增,
+    const guardMenu = insertGuard.menu || (insertGuard.functionPower && insertGuard.functionPower.menu);
+    assert.strictEqual(guardMenu, menu, `${path}/insert 菜单口径不符`);
     assert.deepStrictEqual(insertGuard.ownership, ownRoomScope, `${path}/insert 未按目标墓位声明区域归属`);
   });
 

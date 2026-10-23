@@ -186,6 +186,11 @@ router.post('/insert', async (req, res) => {
   // 预定形态:落 reserve 表(联系人/电话映射 liaison/liaisonPhone),同步 room 只置已预定(销售状态不动,同预定登记);
   // 同样一穴一条,该墓位已有预定记录则复用原行 20260923 修改, 20261011 改为一穴一条,
   if (type === 'reserve') {
+    // 预定限期必填(旧独立预定页下线后由本页承接同一口径):库列可空,必填入参由应用层拦住——
+    // 否则落进 NULL 后预定何时失效无从判断,墓位会一直锁住无法再销售 20261023 新增,
+    if (!String(req.body.reservationExpireDate || '').trim()) {
+      return res.status(400).json({ error: 'reservationExpireDate参数错误!' });
+    }
     // 付款人字段映射为 reserve 的 liaison 列并剔除 reserve 没有的业务列(与修改分支共用同一函数),
     public.prepareReserveFormBody(req.body, false);
     delete req.body.idBusiness;
@@ -209,8 +214,7 @@ router.post('/insert', async (req, res) => {
       reserveStatus: 'statusType.reserveStatusEnum.reserved',
     };
     sqlList.push(public.getUpdateByIdStatement(json));
-    // 墓位限期副本同步(同预定登记):本形态表单目前未开预定限期控件,本次写入的预定记录该列为空,
-    // 同步后墓位副本与预定记录一致;日后本页补上控件则无需再改后端 20261011 新增,
+    // 墓位限期副本同步(同预定登记):由本墓位活动预定记录反推,墓位副本与预定记录一致 20261011 新增,
     sqlList.push(public.getRoomReservationExpireSyncSql(req.data.dataBase, idRoom));
 
     return public.Transaction(sqlList, res);
@@ -461,11 +465,15 @@ router.post('/update', async (req, res) => {
     }
   }
 
-  // 预定形态:更新 reserve 记录的联系人/电话/备注,并将预定限期同步到墓位副本,墓位状态不变(同预定修改) 20260923 修改,
+  // 预定形态:更新 reserve 记录的联系人/电话/预定限期/备注,并将预定限期同步到墓位副本,墓位状态不变(同预定修改) 20260923 修改,
   if (type === 'reserve') {
     const idReserve = public.parseNumericParam(req.body.idBusiness);
     if (idReserve === null) {
       return res.status(400).json({ error: 'idBusiness参数错误!' });
+    }
+    // 预定限期必填口径与新建一致,避免修改时把已有日期抹空 20261023 新增,
+    if (!String(req.body.reservationExpireDate || '').trim()) {
+      return res.status(400).json({ error: 'reservationExpireDate参数错误!' });
     }
 
     // 与新建同一函数:墓位不变所以不更新外键 idRoom,并额外剔除联系人三字段 20261011 修改,
@@ -646,11 +654,26 @@ router.post('/update', async (req, res) => {
     return public.Transaction([statement], res);
   }
 
-  // 安葬证设置形态:按 idCert(idBusiness) 更新 burial_cert 本表,仅更新不联动 20260927 新增,
+  // 安葬证设置形态:按 idCert(idBusiness) 更新 burial_cert 本表,仅更新不联动 20260927 新增;
+  // 权限页已去掉安葬证的“新建”动作,首次保存(idCert=0)也走本修改入口并回落到插入本表,
+  // 使仅具 certificate.modify 的账号可完成首次设置(否则会被 insert 路由的 create 守卫 403)20261023 调整,
   if (type === 'certificate') {
-    const idCert = public.parseNumericParam(req.body.idBusiness);
+    // idBusiness=0 是“无记录”的首次设置标识，而 parseNumericParam 会把数字 0 归一成空串(NULL)，
+    // 故先显式识别 0/'0'(前端表单 idBusiness 为数字 0)，其余值仍走原有非负整数校验 20261023 调整,
+    const rawIdCert = req.body.idBusiness;
+    const idCert = rawIdCert === 0 || rawIdCert === '0' ? 0 : public.parseNumericParam(rawIdCert);
     if (idCert === null) {
       return res.status(400).json({ error: 'idBusiness参数错误!' });
+    }
+
+    // 首次设置(无记录):按插入处理,字段清理口径与 insert 分支一致(保留 idRoom)20261023 新增,
+    if (idCert === 0) {
+      public.prepareCertificateFormBody(req.body, false);
+      delete req.body.idBusiness;
+      req.body.table = req.data.dataBase + '.burial_cert';
+      req.body.operator = req.data.userName;
+      const insertSql = public.getInsertStatement(req.body);
+      return public.Transaction([insertSql], res);
     }
 
     // 业务侧字段剔除与新建共用同一函数;墓位不变故 idRoom 也不得进 SET 20261011 修改,

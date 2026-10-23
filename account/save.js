@@ -50,17 +50,15 @@ router.post('/insert', async (req, res) => {
   let sqlOperator = public.getInsertStatement(json);
   sqlList.push(sqlOperator);
 
-  // 新账户默认菜单权限:基础设置(102100)仅可见,操作人员(102104)全权限 20260916 新增,
+  // 新账户默认菜单权限:基础设置(102100)与操作人员(102104)开启菜单(useMenu=1);动作级权限交由 powerConfig 白名单,
+  // 新建时留 NULL(=该菜单全动作放行,等价旧 useXxx=1 的全权默认),后续由权限页按需收口 20261023 动作列迁移,
   // 先捕获刚插入 operator 的自增ID到用户变量,避免后续 operator_power 自增主键覆盖 LAST_INSERT_ID,
   sqlList.push('set @newOperatorId = LAST_INSERT_ID()');
-  const defaultPowerMenus = [
-    { idMenu: '102100', useCreate: 0, useModify: 0, useDelete: 0, usePower: 0 },
-    { idMenu: '102104', useCreate: 1, useModify: 1, useDelete: 1, usePower: 1 },
-  ];
-  defaultPowerMenus.forEach((menu) => {
+  const defaultPowerMenus = ['102100', '102104'];
+  defaultPowerMenus.forEach((idMenu) => {
     sqlList.push({
-      sql: 'insert into gm_data_000.operator_power (idOperator, idMenu, useMenu, useCreate, useModify, useDelete, useExamine, useFinish, usePower) values (@newOperatorId, ?, 1, ?, ?, ?, 0, 0, ?)',
-      params: [menu.idMenu, menu.useCreate, menu.useModify, menu.useDelete, menu.usePower],
+      sql: 'insert into gm_data_000.operator_power (idOperator, idMenu, useMenu, powerConfig) values (@newOperatorId, ?, 1, NULL)',
+      params: [idMenu],
     });
   });
 
