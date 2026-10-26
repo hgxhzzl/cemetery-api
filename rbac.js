@@ -16,6 +16,22 @@ function requirePlatformAdmin(req, res, next) {
   return res.status(403).json({ error: '无权限:仅平台管理员可操作!' });
 }
 
+// 管理员账号:只认 isAccount=1,不限定所属库(园区管理员也算) 20261026 新增,
+// 与 isPlatformAdmin 的差别就在多出来的 dataBase=gm_data_000 限定:前者是“任意管理员”,
+// 后者是“平台总管库的管理员”,两者不可互相替代,使用时必须明确要的是哪一种,
+function isAccountAdmin(req) {
+  return Number(req.data && req.data.isAccount) === 1;
+}
+
+// 管理员账号中间件:供“登记本机”这类只要求“是管理员”的运维动作使用,不用于账户/合同等全局管理接口,
+// 口径放宽的代价与适用范围见 device.js 顶部注释;失败体走统一信封(手写 { error } 的存量基线只减不增)20261026 新增,
+function requireAccountAdmin(req, res, next) {
+  if (isAccountAdmin(req)) {
+    return next();
+  }
+  return public.respondError(res, 403, '无权限:仅管理员账号可操作!');
+}
+
 // 菜单权限命中查询单语句化:按 name 集合时 JOIN menu 表匹配,按 idMenu 直配时不经过 menu 表,
 // 一次 DB 往返完成 menu→operator_power→operator 链校验,替代旧两步查询(先查 menu 拿 id 再查权限) 20261019 性能优化,
 // 约束:menu name / idMenu 的过滤条件必须写在 WHERE 里排在 a.idOperator 之后,与下方 [userId, ...values] 的顺序一致
@@ -495,6 +511,8 @@ function filterByOperatorRegions(rows, fieldName, allowedRegions) {
 module.exports = {
   isPlatformAdmin,
   requirePlatformAdmin,
+  isAccountAdmin,
+  requireAccountAdmin,
   requirePower,
   requirePowerByMenuName,
   requirePowerByAnyMenuName,

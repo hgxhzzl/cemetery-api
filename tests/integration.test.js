@@ -522,6 +522,21 @@ test('gravePlotBusiness/save insert(reserve): 新建预定记录 + 墓位置为�
         payerPhone: '13900139000',
         // 预定限期为必填(20261011 新增),缺失会被 400 拦下
         reservationExpireDate: '2026-12-31',
+        // 以下为前端统一业务模型的其余键:预定形态必须全部剔除,否则 INSERT 会包含 reserve 表没有的列(20261026 新增),
+        realPrice: '1,200.00',
+        realPriceString: '1,200.00',
+        payerIDCard: '330100199001011234',
+        payee: '李四',
+        serialNo: 'A001',
+        remark: '备注',
+        deceased: '张三',
+        deathDate: '2026-01-01',
+        burialDate: '2026-01-02',
+        deceasedIDCard: '330100199001015678',
+        deceasedRelation: '配偶',
+        contacts: '赵六',
+        contactsphone: '13900139001',
+        contactsIDCard: '330100199001019999',
       }),
     });
     assert.strictEqual(response.status, 200);
@@ -536,6 +551,11 @@ test('gravePlotBusiness/save insert(reserve): 新建预定记录 + 墓位置为�
     // 预定限期随行写入 20261011 新增 20261011 字段改名
     assert.ok(reserveInsert.sql.includes('reservationExpireDate'));
     assert.ok(reserveInsert.params.includes('2026-12-31'));
+    // INSERT 列清单只能是 reserve 表真实列:安葬者/联系人/金额这类跨表列必须已剔除,
+    // 否则真实 MySQL 报 Unknown column,前端只能看到 Internal server error(mock 不校验列名,故在此反向断言)20261026 新增,
+    ['deathDate', 'burialDate', 'deceased', 'contacts', 'contactsphone', 'contactsIDCard', 'realPrice', 'serialNo', 'payee', 'payerIDCard'].forEach((column) => {
+      assert.ok(!reserveInsert.sql.includes(column), `预定 INSERT 不得包含 reserve 表没有的列 ${column}`);
+    });
     // 2. 墓位只置预定状态,不得改写销售状态(预定不等于售出) 20261011 修正,
     const roomUpdate = calls.find(
       (call) => call.sql.includes('gm_data_001.room set') && call.params.includes('statusType.reserveStatusEnum.reserved'),
@@ -1437,25 +1457,47 @@ test('buriedQuery/list: sortMode 切换园区优先与下葬日期优先排序',
   }
 });
 
-// 设备白名单口径统一(审查修复 20261021 P1-1):租户管理员同样 isAccount=1,但不得跨租户登记设备解锁任意登录,
-// 因此 requireAdmin 改按 rbac.isPlatformAdmin(额外限定 dataBase=gm_data_000)判定,
-test('device/bind: 租户管理员(isAccount=1 但非平台库)无权登记设备', async () => {
-  const mockPool = createMockPool([]);
-  database.setPoolForTesting(mockPool);
-
+// 设备白名单口径(20261026 按用户要求调整):登记本机是日常运维动作,白名单又是全局共用的一批指定电脑,
+// 园区管理员(isAccount=1 但 dataBase 不是 gm_data_000)也必须能登记——原 20261021 的“仅平台管理员”口径
+// 会让园区管理员点“登记本机”恒 403;普通操作员(isAccount=0)仍必须被拒,
+test('device/bind: 任一管理员账号可登记设备，普通操作员仍 403', async () => {
   const device = require('../device');
-  const { server, base } = startServer(device.router, '/api/device', { isAccount: 1 });
+
+  // 园区管理员:登录库是自己的租户库,不是平台总管库
+  const adminPool = createMockPool([]);
+  database.setPoolForTesting(adminPool);
+  const admin = startServer(device.router, '/api/device', { isAccount: 1, dataBase: 'gm_data_002' });
   try {
-    const response = await fetch(`${base}/api/device/bind`, {
+    const response = await fetch(`${admin.base}/api/device/bind`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ deviceHash: 'a'.repeat(64), deviceName: 'pc-1' }),
     });
-    assert.strictEqual(response.status, 403, '非平台总管库管理员应 403');
-    assert.ok(!mockPool.calls.some((call) => call.sql.includes('INSERT INTO gm_data_000.device')), '拒绝时不应写入白名单');
+    assert.strictEqual(response.status, 200, '园区管理员应可登记本机');
+    const insert = adminPool.calls.find((call) => call.sql.includes('INSERT INTO gm_data_000.device'));
+    assert.ok(insert, '登记成功时应写入白名单');
+    assert.deepStrictEqual(insert.params, ['a'.repeat(64), 'pc-1']);
   } finally {
-    server.close();
-    database.resetPoolForTesting();
+    admin.server.close();
+  }
+
+  // 普通操作员:登记是管理动作,不得写入全局白名单
+  const operatorPool = createMockPool([]);
+  database.setPoolForTesting(operatorPool);
+  const operator = startServer(device.router, '/api/device', { isAccount: 0, dataBase: 'gm_data_002' });
+  try {
+    const response = await fetch(`${operator.base}/api/device/bind`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deviceHash: 'b'.repeat(64), deviceName: 'pc-2' }),
+    });
+    assert.strictEqual(response.status, 403, '普通操作员不得登记设备');
+    assert.ok(
+      !operatorPool.calls.some((call) => call.sql.includes('INSERT INTO gm_data_000.device')),
+      '拒绝时不应写入白名单',
+    );
+  } finally {
+    operator.server.close();
   }
 });
 

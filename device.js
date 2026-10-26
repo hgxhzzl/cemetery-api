@@ -51,13 +51,16 @@ async function disableDevice(deviceHash) {
   ]);
 }
 
-// 仅平台管理员(isAccount=1)可操作设备白名单:登记/停用是管理动作,普通操作员无权改动指定电脑范围,
-// 口径统一收口到 rbac.isPlatformAdmin(审查修复 20261021 P1-1):原写法只判 isAccount=1,而该列存在于各租户库内,
-// 租户管理员同样为 isAccount=1,因而可跨租户往白名单里登记自己机器并解锁任意设备登录,
-// rbac 口径额外限定 dataBase=gm_data_000(仅平台总管库),与全站全局管理接口保持一致,
+// 管理员账号(isAccount=1)均可操作设备白名单:登记/停用是管理动作,普通操作员无权改动指定电脑范围,
+// 20261026 按用户要求把口径从 rbac.isPlatformAdmin(额外限定 dataBase=gm_data_000)改为 rbac.isAccountAdmin:
+// 白名单是全局共用的一批指定电脑,而园区管理员同样 isAccount=1、又恰恰是最常给新电脑登记本机的人,
+// 平台口径会把日常运维挡在门外(园区管理员登录后点“登记本机”恒 403),
+// 已知代价:任一管理员都能把自己的机器加进这份全局白名单,对全平台生效——本模块只开放登记/停用两个
+// 幂等动作(不删改他人记录、不动业务数据),且登录仍需账号密码,故按“运维可用性优先”取舍;
+// 若日后要收回去,把这里换回 isPlatformAdmin 并同步 routeRegistry 的 adminOnly 即可,两处必须同改,
 function requireAdmin(req, res) {
-  if (!rbac.isPlatformAdmin(req)) {
-    res.status(403).json({ code: 403, message: '仅平台管理员可操作设备白名单' });
+  if (!rbac.isAccountAdmin(req)) {
+    res.status(403).json({ code: 403, message: '仅管理员账号可操作设备白名单' });
     return false;
   }
   return true;

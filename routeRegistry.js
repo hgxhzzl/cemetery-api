@@ -101,6 +101,8 @@ const ownAdminfeeScope = { table: 'adminfee', idField: 'idAdminfee', idParam: 'i
 //   queryDetail  - 配合 menu 或 anyMenu:查询前缀专用口径,详情取数路径按“任一详情页菜单”放行
 //                  (详情路径名单见 rbac.DETAIL_AGGREGATE_ROUTES,本表与之双向对账,详见 auditRouteRegistry) 20261021 二轮 P1-3,
 //   platformOnly - 仅平台管理员(gm_data_000 租户账户)
+//   adminOnly    - 仅管理员账号(isAccount=1,不限租户);只给“任一管理员都要能操作”的运维动作(如设备白名单),
+//                  全局表条目用它时必须写明 globalScopeRelaxReason 20261026 新增
 //   ownership    - 主键记录的区域归属校验;可单独出现(子路径归属校验,权限由同一条目的整前缀守卫担当),
 //                  也可与上面任一权限同时出现
 //   loginOnly    - 显式声明“仅需登录”,必须同时给出 reason(测试据此判定为有意豁免而非漏写)
@@ -138,13 +140,19 @@ const ROUTES = [
     guards: [{ at: '', loginOnly: true, reason: '菜单接口按登录身份过滤且免菜单权限,不含业务数据写口' }],
   },
   {
-    // 设备白名单接口(登记/列表/停用,仅平台管理员可操作) 20260924 新增;原口径由 device.js 内部
-    // requireAdmin 判定,此处再挂一道同名守卫使权限口径在注册表里可见(审查修复 20261021 P1-1/P1-4),
+    // 设备白名单接口(登记/列表/停用) 20260924 新增;原口径由 device.js 内部 requireAdmin 判定,
+    // 此处再挂一道同名守卫使权限口径在注册表里可见(审查修复 20261021 P1-1/P1-4),
+    // 20261026 按用户要求放宽为 adminOnly(任一 isAccount=1 的管理员账号可登记本机):白名单是全局共用的
+    // 一批指定电脑,园区管理员才是日常登记的人,platformOnly 会把园区管理员的“登记本机”恒挡成 403;
+    // 放宽理由必须写在 globalScopeRelaxReason 里由体检校验,避免以后把锁换松了却没有痕迹,
     path: '/api/device',
     router: device.router,
-    note: '登录设备白名单登记/列表/停用',
+    note: '登录设备白名单登记/列表/停用(任一管理员账号)',
     globalScope: 'gm_data_000.device',
-    guards: [{ at: '', platformOnly: true }],
+    globalScopeRelaxReason:
+      '设备白名单是全局共用的一批指定电脑,登记/停用是幂等运维动作且不触及任何租户业务数据,' +
+      '园区管理员(isAccount=1)才是最常登记本机的人;仅平台管理员口径会使园区管理员点“登记本机”恒 403',
+    guards: [{ at: '', adminOnly: true }],
   },
 
   // ==================== 合同(菜单 101102 合同列表,属「用户管理」子树,仅 gm_data_000 平台账户) ====================
@@ -537,6 +545,11 @@ function assertGuardEntry(entry, guard) {
   const hasMenu = Boolean(guard.menu);
   const hasAnyMenu = Boolean(guard.anyMenu);
   const hasFunctionPower = Boolean(guard.functionPower);
+  const hasAdminOnly = Boolean(guard.adminOnly);
+  // 两把管理员锁同时声明等于口径不可读(实际生效的是更严的 platformOnly),直接判为配置错误 20261026 新增,
+  if (guard.platformOnly && hasAdminOnly) {
+    throw new Error(`路由注册表守卫配置错误(${label}):platformOnly 与 adminOnly 不能同时声明`);
+  }
   if (hasMenu && hasAnyMenu) {
     throw new Error(`路由注册表守卫配置错误(${label}):menu 与 anyMenu 不能同时声明`);
   }
@@ -569,10 +582,10 @@ function assertGuardEntry(entry, guard) {
     }
     }
   }
-  if (guard.loginOnly && (hasMenu || hasAnyMenu || hasFunctionPower || guard.platformOnly)) {
+  if (guard.loginOnly && (hasMenu || hasAnyMenu || hasFunctionPower || guard.platformOnly || hasAdminOnly)) {
     throw new Error(`路由注册表守卫配置错误(${label}):loginOnly 不得与权限口径同时声明`);
   }
-  const hasPermission = hasMenu || hasAnyMenu || hasFunctionPower || Boolean(guard.platformOnly);
+  const hasPermission = hasMenu || hasAnyMenu || hasFunctionPower || Boolean(guard.platformOnly) || hasAdminOnly;
   if (!hasPermission && !guard.loginOnly) {
     // 允许“纯归属校验”的守卫项(无权限字段),但必须锁定具体子路径,否则等于整前缀无权限声明,
     if (!guard.ownership || !guard.at) {
@@ -602,6 +615,10 @@ function buildGuardMiddlewares(guard) {
   }
   if (guard.platformOnly) {
     middlewares.push(rbac.requirePlatformAdmin);
+  }
+  // 管理员账号锁:不限租户的 isAccount=1,与上一把的区别见文件头 adminOnly 说明 20261026 新增,
+  if (guard.adminOnly) {
+    middlewares.push(rbac.requireAccountAdmin);
   }
   if (guard.queryDetail) {
     middlewares.push(rbac.requireQueryPowerWithDetail(guard.menu || guard.anyMenu));
@@ -684,8 +701,16 @@ function guardCoversRoute(guardMountPath, routeFullPath) {
   return routePath === guardPath || routePath.startsWith(guardPath + '/');
 }
 
+// 是否属于“真实权限口径”:adminOnly(isAccount=1,不限租户)也是管理员锁,漏算会让设备白名单
+// 的三个写接口在启动体检里被当成“仅登录即可调用”而报错 20261026 补充,
 function guardHasRealPermission(guard) {
-  return Boolean(guard.menu) || Boolean(guard.anyMenu) || Boolean(guard.platformOnly) || Boolean(guard.functionPower);
+  return (
+    Boolean(guard.menu) ||
+    Boolean(guard.anyMenu) ||
+    Boolean(guard.platformOnly) ||
+    Boolean(guard.adminOnly) ||
+    Boolean(guard.functionPower)
+  );
 }
 
 // 详情聚合放行名单与注册表逐项对账(审查修复 20261021 二轮 P1-3):两张表任一侧单独改动都会造成口径不一致 ——
@@ -786,8 +811,18 @@ function auditRouteRegistry(routes = ROUTES) {
     // 却忘收权限时直接启动失败,而不是等到线上发生跨租户读取才发现,
     if (entry.globalScope) {
       const scopeLabel = String(entry.globalScope);
-      if (!guards.some((guard) => !guard.at && guard.platformOnly)) {
-        violations.push(`条目 ${entry.path} 读写全局共享表 ${scopeLabel},却未按整前缀声明 platformOnly(全局表接口漏一道锁即是跨租户读写全平台数据)`);
+      const hasPlatformLock = guards.some((guard) => !guard.at && guard.platformOnly);
+      const hasAdminLock = guards.some((guard) => !guard.at && guard.adminOnly);
+      if (!hasPlatformLock && !hasAdminLock) {
+        violations.push(`条目 ${entry.path} 读写全局共享表 ${scopeLabel},却未按整前缀声明 platformOnly/adminOnly(全局表接口漏一道锁即是跨租户读写全平台数据)`);
+      }
+      // 放宽口径(adminOnly:不限租户的管理员)允许,但必须写明理由:“把锁换松”本身不报错,
+      // 等于悄悄扩大全局表的可写人群,故要求留下痕迹 20261026 新增,
+      if (hasAdminLock && !hasPlatformLock) {
+        const relaxReason = typeof entry.globalScopeRelaxReason === 'string' ? entry.globalScopeRelaxReason.trim() : '';
+        if (!relaxReason) {
+          violations.push(`条目 ${entry.path} 把全局共享表 ${scopeLabel} 的整前缀锁放宽为 adminOnly(不限租户),必须用条目字段 globalScopeRelaxReason 写明理由`);
+        }
       }
       guards
         .filter((guard) => guard.ownership)

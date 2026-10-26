@@ -47,8 +47,9 @@ function collectMountedEndpoints(routes = routeRegistry.ROUTES) {
         fullPath,
         methods: route.methods,
         isWrite: routeRegistry.isWriteMethod(route.methods),
+        // adminOnly(isAccount=1、不限租户)与 platformOnly 同属管理员锁,都要算作“有权限守卫” 20261026 新增,
         hasPermissionGuard: covered.some((guard) =>
-          Boolean(guard.menu || guard.anyMenu || guard.platformOnly || guard.functionPower),
+          Boolean(guard.menu || guard.anyMenu || guard.platformOnly || guard.adminOnly || guard.functionPower),
         ),
       });
     }
@@ -326,11 +327,10 @@ test('routeRegistry: 路由内部守卫必须与条目 innerGuards 双向对账'
 
 // 「用户管理」子树与设备白名单的收口对账(审查修复 20261021 三轮 P1-1):
 // 这几个接口读写的都是 gm_data_000 里的全局表,语句本身不带租户条件,唯一的隔离就剩权限守卫一行,
-// 因此“仅平台管理员”不得只活在注释或菜单配置里:条目必须声明 globalScope + 整前缀 platformOnly,
-// 且真实请求必须以 403 结束并证明守卫排在 handler 之前(一条碰 contract 表的 SQL 都不该发出去),
-test('routeRegistry: 全局共享表条目必须整前缀收口为仅平台管理员', async () => {
+// 因此管理员锁不得只活在注释或菜单配置里:条目必须声明 globalScope + 整前缀锁,且真实请求必须以 403 结束;
+// 设备白名单是唯一被有意放宽为 adminOnly(任一管理员)的全局表,其放宽理由单独断言 20261026 调整,
+test('routeRegistry: 全局共享表条目必须整前缀收口为管理员口径', async () => {
   const PLATFORM_ONLY_ENTRIES = [
-    '/api/device',
     '/api/contract-save',
     '/api/contract-query',
     '/api/contract-delete',
@@ -349,6 +349,20 @@ test('routeRegistry: 全局共享表条目必须整前缀收口为仅平台管�
       `${path} 存在全局表但未按整前缀声明 platformOnly`,
     );
   });
+
+  // 设备白名单:全局表身份不变,但锁从 platformOnly 放宽到 adminOnly(园区管理员也要能登记本机),
+  // 因此必须同时满足两件事——声明 adminOnly、且用 globalScopeRelaxReason 留下放宽理由 20261026 新增,
+  const deviceEntry = routeRegistry.ROUTES.find((item) => item.path === '/api/device');
+  assert.ok(deviceEntry, '注册表缺少条目 /api/device');
+  assert.strictEqual(deviceEntry.globalScope, 'gm_data_000.device');
+  assert.ok(
+    (deviceEntry.guards || []).some((guard) => !guard.at && guard.adminOnly && !guard.platformOnly),
+    '/api/device 应整前缀声明 adminOnly(任一管理员账号),且不得同时声明 platformOnly',
+  );
+  assert.ok(
+    typeof deviceEntry.globalScopeRelaxReason === 'string' && deviceEntry.globalScopeRelaxReason.length > 0,
+    '/api/device 放宽为 adminOnly 必须写明 globalScopeRelaxReason',
+  );
 
   // 行为面:以租户内普通操作员(isAccount=0,且本例连菜单权限池也返回空)请求合同三个前缀的全部接口,
   // 全部应被平台守卫挡下;若守卫排在 handler 之后,pool 会收到“SELECT * FROM gm_data_000.contract”这种整库语句,
@@ -416,6 +430,32 @@ test('routeRegistry: 全局共享表条目漏收权限或误挂归属时报错',
   );
   // 总数账:两个条目各贡献一处(第二条的平台锁已声明,只报 ownership 那项),多报即为误伤,
   assert.strictEqual(violations.length, 2, `应只报出 2 处问题,实际:${violations.join(' | ')}`);
+});
+
+// 放宽口径必须留痕(20261026 新增):把全局表的整前缀锁从 platformOnly 换成更松的 adminOnly 时,
+// 若不留 globalScopeRelaxReason,体检应当报错——否则“谁把可写人群从平台管理员扩大到全部管理员”将无从追溯,
+test('routeRegistry: 全局表放宽为 adminOnly 未写理由时报错', () => {
+  const relaxWithoutReason = {
+    path: '/api/fake-global-admin',
+    router: require('express').Router(),
+    note: '放宽成任一管理员却没有理由',
+    globalScope: 'gm_data_000.device',
+    guards: [{ at: '', adminOnly: true }],
+  };
+  const withReason = {
+    ...relaxWithoutReason,
+    path: '/api/fake-global-admin-ok',
+    globalScopeRelaxReason: '登记本机是幂等运维动作,园区管理员也要能用',
+  };
+
+  const violations = routeRegistry.auditRouteRegistry([relaxWithoutReason]);
+  assert.ok(
+    violations.some((line) => line.includes('/api/fake-global-admin') && line.includes('globalScopeRelaxReason')),
+    '放宽为 adminOnly 未写理由未被捕获',
+  );
+  assert.strictEqual(violations.length, 1, `应只报出 1 处问题,实际:${violations.join(' | ')}`);
+  // 反向:写明理由后不得再报(避免把正常条目一并误伤),
+  assert.deepStrictEqual(routeRegistry.auditRouteRegistry([withReason]), []);
 });
 
 // 登记页下线的防回潮约束(审查修复 20261021 三轮 P1-3;20261023 追加预定):

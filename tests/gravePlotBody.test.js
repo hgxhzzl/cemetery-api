@@ -1,6 +1,6 @@
 // lib/gravePlotBody.js 的形态拆分口径用例(审查修复 20261021 二轮 P2-15),
 // 本模块是从 gravePlotBusiness/save.js 里抽出的纯数据整形:新建与修改两个 handler 原先各抄一份
-// 完全相同的 delete 清单,拆分必须逐字保持原口径(尤其是“新建分支不剔除 idRoom/联系人三字段”这类两侧差异),
+// 完全相同的 delete 清单,拆分必须逐字保持原口径(仅 idRoom 这类“新建要写、修改不写”的差异保留),
 // 而集成用例并不会覆盖全部六种形态,因此用一组纯函数断言把每个形态的“剔除集合 + 捕获值”钉住,
 const test = require('node:test');
 const assert = require('node:assert');
@@ -116,25 +116,28 @@ test('gravePlotBody: 下葬形态剔除销售侧字段但保留安葬者字段�
   ]);
 });
 
-test('gravePlotBody: 预定形态映射 liaison 且新建分支不动 idRoom 与联系人字段', () => {
+test('gravePlotBody: 预定形态映射 liaison 并剔除 reserve 表没有的跨表列', () => {
   const inserted = fullBody();
   prepareReserveFormBody(inserted, false);
   assert.strictEqual(inserted.liaison, '张三');
   assert.strictEqual(inserted.liaisonPhone, '13800138000');
-  // 新建分支的历史口径:只清付款人/金额/安葬者四件,联系人三字段与 idRoom 原样保留,
+  // 新建分支:外键 idRoom 需写入,不得剔除;其余非 reserve 列一律剔除——
+  // 20261026 修复:此前新建分支保留联系人三字段且两个分支都漏剔 deathDate,前端统一业务模型提交时
+  // 这些键会被拼进 INSERT 列清单,MySQL 直接报未知列(前端只看到 Internal server error),
   assert.ok('idRoom' in inserted, '新建预定不应剔除 idRoom(外键需要写入)');
-  assert.ok('contacts' in inserted, '新建预定不应剔除 contacts');
-  ['payer', 'payerPhone', 'payerIDCard', 'realPrice', 'realPriceString', 'payee', 'serialNo', 'deceased', 'burialDate', 'deceasedIDCard', 'deceasedRelation'].forEach((key) => {
+  ['payer', 'payerPhone', 'payerIDCard', 'realPrice', 'realPriceString', 'payee', 'serialNo',
+    'deceased', 'deathDate', 'burialDate', 'deceasedIDCard', 'deceasedRelation',
+    'contacts', 'contactsphone', 'contactsPhone', 'contactsIDCard'].forEach((key) => {
     assert.ok(!(key in inserted), `新建预定应剔除 ${key}`);
   });
+  // 剩余键集合必须恰为 reserve 表真实列(外加由 handler 删除的 idBusiness/type),
+  assert.deepStrictEqual(remainingKeys(inserted), ['idBusiness', 'idRoom', 'liaison', 'liaisonPhone', 'remark', 'type']);
 
   const updated = fullBody();
   prepareReserveFormBody(updated, true);
   assert.strictEqual(updated.liaison, '张三');
-  // 修改分支墓位不变:外键 idRoom 不得进 SET,联系人三字段也与 reserve 表无关,
-  ['idRoom', 'contacts', 'contactsphone', 'contactsIDCard'].forEach((key) => {
-    assert.ok(!(key in updated), `修改预定应剔除 ${key}`);
-  });
+  // 修改分支墓位不变:外键 idRoom 不得进 SET,其余剔除口径与新建一致,
+  assert.deepStrictEqual(remainingKeys(updated), ['idBusiness', 'liaison', 'liaisonPhone', 'remark', 'type']);
 });
 
 test('gravePlotBody: 安葬证形态剔除业务字段,修改分支额外剔除 idRoom', () => {
